@@ -26,14 +26,15 @@ jobs:
         run: npm install
 
       - name: Build de la App (Generar .exe e instalador NSIS)
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         with:
           tagName: v0.1.0
           releaseName: "CD Electronica v0.1.0"
           releaseBody: "Build automatico generado."
           releaseDraft: false
           prerelease: false
-          build-type: "cargo"
           args: --bundles nsis
