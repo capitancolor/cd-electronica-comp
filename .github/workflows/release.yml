@@ -1,0 +1,39 @@
+name: "Publicar App Windows"
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'npm'
+
+      - name: Instalar Rust estable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Instalar dependencias de JS
+        run: npm install
+
+      - name: Build de la App (Generar .exe e instalador NSIS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v0.1.0
+          releaseName: "CD Electronica v0.1.0"
+          releaseBody: "Build automatico generado."
+          releaseDraft: false
+          prerelease: false
+          build-type: "cargo"
+          args: --bundles nsis

@@ -1,0 +1,56 @@
+# CD INFORMÁTICA - Estado del Proyecto
+# Actualizado: 2026-05-03
+
+## Que se hizo
+1. Revisión inicial de la app
+   - Proyecto: React + Tauri 2.0 + Supabase
+   - Estructura: Frontend React en /src, Backend Tauri en /src-tauri
+   - Dependencias: @tauri-apps/api, @supabase/supabase-js, react, etc.
+
+2. Diagnóstico de error "npm run tauri dev"
+   - Error: JSON inválido en tauri.conf.json (trailing characters en línea 40)
+   - Causa: Contenido duplicado después de la línea 39 (se repiten secciones app, bundle, plugins)
+   - CORREGIDO: 2026-05-03 - Eliminado JSON duplicado en tauri.conf.json
+
+3. Prueba de ejecución
+   - JSON arreglado: ✓
+   - Vite dev server inicia correctamente en http://localhost:5173
+   - Entorno Tauri verificado (Rust 1.94.1, Node 24.14.0)
+
+4. Modificación de interfaz de Stock (2026-05-03)
+   - Eliminados botones de "Entrada", "Salida" y "Transferir" de la tabla de stock
+   - Solo se mantienen botones "Editar" y "Eliminar"
+   - Eliminada lógica de movimientos en StockModales.jsx
+   - Eliminadas importaciones de funciones ajustarStock y transferirStock
+   - Eliminadas funciones ajustarStock y transferirStock de negocio.js
+
+## Estructura del proyecto
+- package.json: React 18 + Vite + Tauri 2.10.1
+- src-tauri/Cargo.toml: Tauri 2.0 con plugins sql, fs, dialog
+- Frontend: React con Vite
+- Base de datos: SQLite vía tauri-plugin-sql
+
+## Como ejecutar (una vez arreglado)
+cd "/home/pablo/Escritorio/Cd-informatica-main(1)/Cd-informatica-main"
+npm install
+npm run tauri dev
+
+## Problemas encontrados
+- [x] JSON duplicado en tauri.conf.json (líneas 40-70 sobran) - CORREGIDO 2026-05-03
+- [x] Falta verificar si node_modules está completo - VERIFICADO: node_modules presente
+- [x] Falta verificar configuración de Rust/Tauri - VERIFICADO: Entorno OK (Rust 1.94.1, Node 24.14.0)
+
+## Pendientes
+- [x] Corregir tauri.conf.json
+- [x] Verificar instalación de Tauri CLI - Instalado v2.10.1
+- [ ] Esperar primer build de Rust (puede tardar 5-10 min)
+- [ ] Verificar que la app abra correctamente
+- [ ] Revisar funcionalidades faltantes (ver README.md)
+
+## Notas
+- Primera compilación de Rust tarda varios minutos (limpieza + build)
+- Versiones de Tauri algo desactualizadas pero funcionales
+- Vite dev server funciona correctamente en localhost:5173
+
+## Para retomarlo
+Decile a opencode: "retoma CD Informática" y va a leer este archivo.
