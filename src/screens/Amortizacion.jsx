@@ -85,7 +85,7 @@ async function cargarDatos() {
   const abrirModal = (gasto = null) => {
     setModal({
       show: true,
-      data: gasto ? { ...gasto } : { ...estadoInicial }
+      data: gasto ? { ...gasto, dias_aplicados: gasto.dias_aplicados || [] } : { ...estadoInicial }
     })
   }
 
@@ -101,7 +101,7 @@ async function cargarDatos() {
         monto: parseFloat(data.monto),
         usuario_id: usuario.id,
         fecha: new Date(anioActual, mesActual, 1).toISOString(),
-        dias_aplicados: data.dias_aplicados.length > 0 ? data.dias_aplicados : null
+        dias_aplicados: data.dias_aplicados?.length > 0 ? data.dias_aplicados : null
       }
       if (data.id) await actualizarGasto(data.id, payload)
       else await registrarGasto(payload)
@@ -124,8 +124,11 @@ async function cargarDatos() {
   const getGastoParaDia = (dia) => {
     return gastos.reduce((acc, g) => {
       const aplicados = g.dias_aplicados || Array.from({ length: diasEnMes }, (_, i) => i + 1)
-      if (aplicados.includes(dia)) return acc + (Number(g.monto) / aplicados.length)
-      return acc
+      if (!aplicados.includes(dia)) return acc
+      const porDia = Math.floor(Number(g.monto) / aplicados.length)
+      const resto = Number(g.monto) - porDia * aplicados.length
+      const ultimoDia = Math.max(...aplicados)
+      return acc + porDia + (dia === ultimoDia ? resto : 0)
     }, 0)
   }
 

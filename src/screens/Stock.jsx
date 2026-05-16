@@ -5,6 +5,7 @@ import { eliminarProducto, getProveedores } from '../services/negocio' // Quitam
 import { Icon, toast } from '../components/UI'
 import StockModales from './StockModales'
 import { exportarStockExcel } from '../services/exportExcel'
+import { importarStockExcel } from '../services/importarExcel'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
 
@@ -123,13 +124,16 @@ const cargarStock = useCallback(async () => {
       const dataNormalizada = data.map(p => {
         // Buscamos el nombre del proveedor en la lista cargada
         const prov = proveedores.find(pr => Number(pr.id) === Number(p.proveedor_id));
+        // Buscamos el nombre de la categoría
+        const cat = categorias.find(c => Number(c.id) === Number(p.categoria_id));
 
         return {
           ...p,
           en_promo: p.en_promo === 1, // SQLite guarda los booleanos como 1 o 0
           stock_l1: p.stock_l1 || 0,
           stock_l2: p.stock_l2 || 0,
-          proveedor_nombre: prov ? prov.nombre : '-'
+          proveedor_nombre: prov ? prov.nombre : '-',
+          categoria_nombre: cat ? cat.nombre : '-'
         };
       });
 
@@ -139,7 +143,7 @@ const cargarStock = useCallback(async () => {
     } finally {
       setLoading(false);
     }
-  }, [busqueda, proveedores]); // Depende de proveedores para mapear los nombres
+  }, [busqueda, proveedores, categorias]);
 
 
 const cargarListasBase = async () => {
@@ -225,6 +229,35 @@ const fetchDolar = async () => {
   }
 };
 
+  const handleImportarExcel = async () => {
+    try {
+      setLoading(true)
+      toast('Seleccionando archivo...', 'success')
+      const result = await importarStockExcel({ cotizacion, usuarioId: usuario.id })
+      if (!result) {
+        toast('Importación cancelada', 'error')
+        return
+      }
+      const msg = `Importación: ${result.importados} nuevos, ${result.actualizados} actualizados, ${result.errores} errores de ${result.total} filas`
+      if (result.errores > 0 && result.detalles?.length) {
+        const detalle = result.detalles.slice(0, 3).map(d => `Fila ${d.fila}: ${d.error}`).join(' | ')
+        toast(msg + '. ' + detalle, 'error')
+      } else if (result.importados > 0 || result.actualizados > 0) {
+        toast(msg, 'success')
+      } else {
+        toast(msg, 'error')
+      }
+      if (result.importados > 0 || result.actualizados > 0) {
+        await cargarStock()
+      }
+    } catch (e) {
+      console.error('Error en importación:', e)
+      toast('Error al importar: ' + (e.message || 'desconocido'), 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleSort = (key) => {
     let direction = 'asc';
     if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
@@ -298,6 +331,11 @@ const fetchDolar = async () => {
               PROVEEDORES
             </button>
           )}
+          {esAdmin && (
+            <button onClick={handleImportarExcel} disabled={loading} title="Importar stock desde archivo Excel" style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.4 : 1 }}>
+              📥 IMPORTAR EXCEL
+            </button>
+          )}
           <button onClick={() => { console.log('Stock a exportar:', listaAMostrar?.length || 0); exportarStockExcel(listaAMostrar); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
             📊 EXCEL
           </button>
@@ -356,6 +394,7 @@ const fetchDolar = async () => {
               <SortableTh label="PRODUCTO" field="nombre" sortConfig={sortConfig} onSort={handleSort} />
               <SortableTh label="MARCA" field="marca" sortConfig={sortConfig} onSort={handleSort} />
               <SortableTh label="MODELO" field="modelo" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="CATEGORÍA" field="categoria_nombre" sortConfig={sortConfig} onSort={handleSort} />
               {esAdmin && (
                 <>
                   <SortableTh label="COSTO FIJO." field="precio_costo" sortConfig={sortConfig} onSort={handleSort} align="right" />
@@ -391,6 +430,7 @@ const fetchDolar = async () => {
                   </td>
                   <td style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{p.marca}</td>
                   <td style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{p.modelo}</td>
+                  <td style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{p.categoria_nombre}</td>
                   {esAdmin && (
                     <>
                       <td align="right" style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{fmt(p.precio_costo)}</td>

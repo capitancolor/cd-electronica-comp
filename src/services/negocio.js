@@ -1190,10 +1190,12 @@ export async function sincronizarTablasMaestras() {
         
         const db = await Database.load("sqlite:cd_electronica.db");
 
-        // 2. Sincronizar Categorías (estas no suelen tener conflictos de stock)
+        // 2. Sincronizar Categorías
         const { data: cats, error: errCats } = await supabase.from('categorias').select('*');
         if (errCats) throw errCats;
         if (cats) {
+            // Limpiar locales eliminados en la nube
+            await db.execute("DELETE FROM categorias");
             for (const c of cats) {
                 await db.execute(
                     "INSERT OR REPLACE INTO categorias (id, nombre) VALUES (?, ?)", 

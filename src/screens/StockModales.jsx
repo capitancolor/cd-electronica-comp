@@ -4,6 +4,15 @@ import { toast, Icon } from '../components/UI'
 import { crearProducto, getCategorias, getProveedores } from '../services/negocio'
 import Database from '@tauri-apps/plugin-sql' // <-- Asegurate de tener este import
 
+const formatPesos = (val) => {
+  if (!val && val !== 0) return ''
+  const raw = String(val).replace(/\./g, '')
+  if (!raw) return ''
+  return raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+}
+
+const stripFormat = (val) => String(val).replace(/\./g, '')
+
 export default function StockModales({
   modal, cerrarModal, formMov, setFormMov, formNuevo, setFormNuevo,
   loading, setLoading, locales, proveedores, categorias,
@@ -20,7 +29,7 @@ export default function StockModales({
   const isGestion = ['categorias', 'proveedores'].includes(modal.tipo)
 
   const handlePrecioARSChange = (e) => {
-    const value = e.target.value
+    const value = stripFormat(e.target.value)
     const usdCalculado = (cotizacion > 0 && value) ? (parseFloat(value) / cotizacion).toFixed(2) : '0.00'
     if (isEdit) {
       setModal({ ...modal, item: { ...modal.item, precio_costo: value, precio_costo_usd: usdCalculado } })
@@ -249,10 +258,16 @@ export default function StockModales({
                   <div>
                     <label style={{ fontWeight: 700, fontSize: 11, color: '#854d0e', marginBottom: 3, display: 'block' }}>Precio de Oferta (ARS)</label>
                     <input 
-                      type="number" 
-                      placeholder="Ej: 5500"
-                      value={isEdit ? (modal.item.precio_promo || '') : (formNuevo.precio_promo || '')} 
-                      onChange={e => isEdit ? setModal({...modal, item: {...modal.item, precio_promo: e.target.value}}) : setFormNuevo({...formNuevo, precio_promo: e.target.value})} 
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="Ej: 5.500"
+                      value={formatPesos(isEdit ? modal.item.precio_promo : formNuevo.precio_promo)} 
+                      onChange={e => {
+                        const raw = stripFormat(e.target.value)
+                        if (raw === '' || /^\d+$/.test(raw)) {
+                          isEdit ? setModal({...modal, item: {...modal.item, precio_promo: raw}}) : setFormNuevo({...formNuevo, precio_promo: raw})
+                        }
+                      }} 
                       style={{ width: '100%', padding: 10, border: '2px solid #fbc02d', borderRadius: 8, fontSize: 16, fontWeight: 800, color: '#000' }} 
                     />
                   </div>
@@ -273,7 +288,7 @@ export default function StockModales({
               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: 10, alignItems: 'end' }}>
                 <div>
                   <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Costo ARS</label>
-                  <input type="number" value={isEdit ? modal.item.precio_costo : formNuevo.precio_costo} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
+                  <input type="text" inputMode="numeric" value={formatPesos(isEdit ? modal.item.precio_costo : formNuevo.precio_costo)} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
                 </div>
                 <div style={{ background: '#f4f4f4', padding: '10px', borderRadius: 8, border: '1px solid #eee', textAlign: 'center' }}>
                   <div style={{ fontSize: 9, fontWeight: 700, color: '#888' }}>U$S ESTIMADO</div>
@@ -283,7 +298,12 @@ export default function StockModales({
 
               <div>
                 <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Venta Final ARS (Normal)</label>
-                <input type="number" value={isEdit ? modal.item.precio_venta : formNuevo.precio_venta} onChange={e => isEdit ? setModal({...modal, item: {...modal.item, precio_venta: e.target.value}}) : setFormNuevo({...formNuevo, precio_venta: e.target.value})} style={{ width: '100%', padding: 12, border: '1px solid #2e7d32', borderRadius: 8, fontSize: 18, fontWeight: 800, color: '#000' }} />
+                <input type="text" inputMode="numeric" value={formatPesos(isEdit ? modal.item.precio_venta : formNuevo.precio_venta)} onChange={e => {
+                  const raw = stripFormat(e.target.value)
+                  if (raw === '' || /^\d+$/.test(raw)) {
+                    isEdit ? setModal({...modal, item: {...modal.item, precio_venta: raw}}) : setFormNuevo({...formNuevo, precio_venta: raw})
+                  }
+                }} style={{ width: '100%', padding: 12, border: '1px solid #2e7d32', borderRadius: 8, fontSize: 18, fontWeight: 800, color: '#000' }} />
               </div>
 
               

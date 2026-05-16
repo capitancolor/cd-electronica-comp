@@ -209,6 +209,8 @@ const cargarListasBase = async () => {
             ...p, 
             en_promo: p.en_promo === 1,
             stockActual: stockLocalActual, 
+            stockOtroLocal,
+            otroLocalId,
             infoExtra 
           };
         });
@@ -264,13 +266,14 @@ const cargarListasBase = async () => {
     }
     
     // Si es nuevo en el carrito, le "pegamos" el stock que traía el producto
+    const precioFinal = prod.en_promo && prod.precio_promo ? parseFloat(prod.precio_promo) : parseFloat(prod.precio_venta);
     return [...prev, { 
       producto_id: prod.id, 
       nombre: prod.nombre, 
-      precio_unitario: parseFloat(prod.precio_venta), 
+      precio_unitario: precioFinal, 
       cantidad: 1,
       esManual: prod.esManual || false,
-      stockDisponible: prod.stockActual // <--- ESTO ES LA CLAVE
+      stockDisponible: prod.stockActual
     }];
   });
   setBusqueda('');
@@ -423,11 +426,18 @@ async function confirmarVentaFinal() {
 
             {/* PRECIO Y STOCK */}
             <div style={{ width: 100, textAlign: 'right' }}>
-              <div style={{ fontWeight: 800, color: tieneStockLocal ? UI.resultPrice : UI.resultPriceNoStock }}>
-                {fmt(p.precio_venta)}
-              </div>
+              {p.en_promo && p.precio_promo ? (
+                <>
+                  <div style={{ fontSize: 10, color: '#9ca3af', textDecoration: 'line-through' }}>{fmt(p.precio_venta)}</div>
+                  <div style={{ fontWeight: 800, color: '#dc2626' }}>{fmt(p.precio_promo)}</div>
+                </>
+              ) : (
+                <div style={{ fontWeight: 800, color: tieneStockLocal ? UI.resultPrice : UI.resultPriceNoStock }}>
+                  {fmt(p.precio_venta)}
+                </div>
+              )}
               <div style={{ fontSize: 10, color: tieneStockLocal ? UI.resultStock : '#dc2626', fontWeight: 700 }}>
-                {tieneStockLocal ? `${p.stockActual} u.` : 'SIN STOCK'}
+                {tieneStockLocal ? `${p.stockActual} u.` : (p.infoExtra?.tipo === 'otro' ? `Stock en LOCAL ${p.otroLocalId}: ${p.stockOtroLocal} u.` : 'SIN STOCK')}
               </div>
             </div>
 

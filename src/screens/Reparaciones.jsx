@@ -22,7 +22,7 @@ export default function Reparaciones() {
   const estadoInicial = { 
     fecha: new Date().toISOString().split('T')[0],
     cliente: '', telefono: '', equipo: '', marca: '', modelo: '', 
-    problema: '', arreglo: '', accesorios: '', service: false, total: 0 
+    problema: '', arreglo: '', accesorios: '', service: false, total: 0, estado: 'Pendiente'
   }
 
   const cargar = async () => {
@@ -122,11 +122,13 @@ export default function Reparaciones() {
           <thead style={{ position: 'sticky', top: 0, background: UI.headerBg, zIndex: 10 }}>
             <tr>
               <SortableTh label="FECHA" field="fecha" width="10%" />
-              <SortableTh label="CLIENTE" field="cliente" width="20%" />
-              <SortableTh label="EQUIPO / MARCA" field="equipo" width="25%" />
-              <SortableTh label="ESTADO / TÉCNICO" field="arreglo" width="25%" />
+              <SortableTh label="CLIENTE" field="cliente" width="16%" />
+              <SortableTh label="EQUIPO" field="equipo" width="14%" />
+              <SortableTh label="MARCA" field="marca" width="12%" />
+              <SortableTh label="MODELO" field="modelo" width="12%" />
+              <SortableTh label="ESTADO" field="estado" width="12%" />
               <SortableTh label="TOTAL" field="total" width="10%" />
-              <th style={{ ...styles.th, textAlign: 'center', width: '10%' }}>ACCIONES</th>
+              <th style={{ ...styles.th, textAlign: 'center', width: '14%' }}>ACCIONES</th>
             </tr>
           </thead>
           <tbody>
@@ -137,13 +139,11 @@ export default function Reparaciones() {
                   <div style={{ fontWeight: 700 }}>{r.cliente}</div>
                   <div style={{ fontSize: 11, color: '#666' }}>{r.telefono}</div>
                 </td>
+                <td style={{ ...styles.td, fontWeight: 600 }}>{r.equipo}</td>
+                <td style={styles.td}>{r.marca || '-'}</td>
+                <td style={styles.td}>{r.modelo || '-'}</td>
                 <td style={styles.td}>
-                  <div style={{ fontWeight: 600 }}>{r.equipo} {r.marca}</div>
-                  <div style={{ fontSize: 11, color: UI.accent }}>{r.modelo}</div>
-                </td>
-                <td style={styles.td}>
-                   <div style={{ fontSize: 12 }}>{r.arreglo || 'Pendiente...'}</div>
-                   {r.service && <Badge color="#10b981">SERVICE</Badge>}
+                  <Badge color={r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : '#6b7280'}>{r.estado || 'Pendiente'}</Badge>
                 </td>
                 <td style={{ ...styles.td, fontWeight: 800 }}>{fmt(r.total)}</td>
                 <td style={{ ...styles.td, textAlign: 'center' }}>
@@ -213,6 +213,18 @@ export default function Reparaciones() {
               <div>
                 <label style={styles.label}>Trabajo Realizado / Notas Técnicas</label>
                 <textarea style={{...styles.modalInput, height: 50}} value={modal.data.arreglo} onChange={e => setModal({...modal, data: {...modal.data, arreglo: e.target.value}})} />
+              </div>
+
+              <div style={{ display: 'flex', gap: 15, alignItems: 'end' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={styles.label}>Estado</label>
+                  <select value={modal.data.estado || 'Pendiente'} onChange={e => setModal({...modal, data: {...modal.data, estado: e.target.value}})} style={styles.modalInput}>
+                    <option value="Pendiente">Pendiente</option>
+                    <option value="En Progreso">En Progreso</option>
+                    <option value="Completado">Completado</option>
+                    <option value="Entregado">Entregado</option>
+                  </select>
+                </div>
               </div>
 
               {/* AREA DE CIERRE DE ORDEN */}
