@@ -290,9 +290,17 @@ export default function StockModales({
                   <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Costo ARS</label>
                   <input type="text" inputMode="numeric" value={formatPesos(isEdit ? modal.item.precio_costo : formNuevo.precio_costo)} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
                 </div>
-                <div style={{ background: '#f4f4f4', padding: '10px', borderRadius: 8, border: '1px solid #eee', textAlign: 'center' }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, color: '#888' }}>U$S ESTIMADO</div>
-                  <div style={{ fontSize: 18, fontWeight: 900, color: '#2e7d32' }}>{isEdit ? modal.item.precio_costo_usd : (formNuevo.precio_costo_usd || '0.00')}</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ background: '#f4f4f4', padding: '10px', borderRadius: 8, border: '1px solid #eee', textAlign: 'center' }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: '#888' }}>U$S ESTIMADO</div>
+                    <div style={{ fontSize: 18, fontWeight: 900, color: '#2e7d32' }}>{isEdit ? modal.item.precio_costo_usd : (formNuevo.precio_costo_usd || '0.00')}</div>
+                  </div>
+                  <div style={{ background: '#e8f5e9', padding: '10px', borderRadius: 8, border: '1px solid #66bb6a', textAlign: 'center' }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: '#2e7d32' }}>CON EL 100%</div>
+                    <div style={{ fontSize: 18, fontWeight: 900, color: '#1b5e20' }}>
+                      {formatPesos(String((isEdit ? Number(modal.item.precio_costo || 0) : Number(formNuevo.precio_costo || 0)) * 2))}
+                    </div>
+                  </div>
                 </div>
               </div>
 

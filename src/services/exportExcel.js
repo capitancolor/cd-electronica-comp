@@ -217,7 +217,7 @@ export async function exportarStockExcel(productos = []) {
     }
     
     const filas = productos.map(p => ({
-      'Codigo': p.codigo || '',
+      'Codigo': Number(p.codigo) || '',
       'Producto': p.nombre || '',
       'Categoria': p.categoria || 'General',
       'Marca': p.marca || '',

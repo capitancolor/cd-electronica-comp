@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Database from '@tauri-apps/plugin-sql' // <-- IMPORTANTE: Agregar esto
 import { supabase } from '../supabase'
 import { eliminarProducto, getProveedores } from '../services/negocio' // Quitamos getStock, getLocales y getCategorias
 import { Icon, toast } from '../components/UI'
 import StockModales from './StockModales'
 import { exportarStockExcel } from '../services/exportExcel'
-import { importarStockExcel } from '../services/importarExcel'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
 
@@ -77,11 +76,18 @@ export default function Stock({ usuario }) {
   const [filtroProveedor, setFiltroProveedor] = useState('')
   const [filtroMarca, setFiltroMarca] = useState('')
   const [busqueda, setBusqueda] = useState('')
+  const [filtroBusqueda, setFiltroBusqueda] = useState('')
+  const debounceRef = useRef(null)
+
+  const [pagina, setPagina] = useState(1)
+  const POR_PAGINA = 50
 
   const [sortConfig, setSortConfig] = useState({ key: 'nombre', direction: 'asc' })
   const [modal, setModal] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [ready, setReady] = useState(false)
   const [cotizacion, setCotizacion] = useState(1100)
+  const dbRef = useRef(null)
 
   const estadoInicialNuevo = {
     nombre: '',
@@ -101,41 +107,30 @@ export default function Stock({ usuario }) {
   const [formNuevo, setFormNuevo] = useState(estadoInicialNuevo)
   const [formMov, setFormMov] = useState({ cantidad: '', local_id: '', destino_id: '' }) // Mantenido por si se requiere en el futuro
 
-const cargarStock = useCallback(async () => {
+const getDb = async () => {
+    if (!dbRef.current) dbRef.current = await Database.load("sqlite:cd_electronica.db");
+    return dbRef.current;
+  }
+
+  const cargarStock = useCallback(async () => {
     try {
       setLoading(true);
-      const db = await Database.load("sqlite:cd_electronica.db");
+      const db = await getDb();
+      const data = await db.select("SELECT * FROM productos WHERE activo = 1");
 
-      // 1. Armamos la consulta local
-      let query = "SELECT * FROM productos WHERE activo = 1";
-      let params = [];
+      const provMap = {};
+      proveedores.forEach(p => provMap[p.id] = p.nombre);
+      const catMap = {};
+      categorias.forEach(c => catMap[c.id] = c.nombre);
 
-      if (busqueda) {
-        // Buscamos por nombre, marca o modelo. El ? es el comodín de SQLite
-        query += " AND (nombre LIKE ? OR marca LIKE ? OR modelo LIKE ?)";
-        const termino = `%${busqueda}%`;
-        params.push(termino, termino, termino);
-      }
-
-      // 2. Ejecutamos contra el archivo .db local
-      const data = await db.select(query, params);
-
-      // 3. Normalizamos los datos
-      const dataNormalizada = data.map(p => {
-        // Buscamos el nombre del proveedor en la lista cargada
-        const prov = proveedores.find(pr => Number(pr.id) === Number(p.proveedor_id));
-        // Buscamos el nombre de la categoría
-        const cat = categorias.find(c => Number(c.id) === Number(p.categoria_id));
-
-        return {
-          ...p,
-          en_promo: p.en_promo === 1, // SQLite guarda los booleanos como 1 o 0
-          stock_l1: p.stock_l1 || 0,
-          stock_l2: p.stock_l2 || 0,
-          proveedor_nombre: prov ? prov.nombre : '-',
-          categoria_nombre: cat ? cat.nombre : '-'
-        };
-      });
+      const dataNormalizada = data.map(p => ({
+        ...p,
+        en_promo: p.en_promo === 1,
+        stock_l1: p.stock_l1 || 0,
+        stock_l2: p.stock_l2 || 0,
+        proveedor_nombre: provMap[p.proveedor_id] || '-',
+        categoria_nombre: catMap[p.categoria_id] || '-'
+      }));
 
       setStock(dataNormalizada);
     } catch (e) {
@@ -143,21 +138,14 @@ const cargarStock = useCallback(async () => {
     } finally {
       setLoading(false);
     }
-  }, [busqueda, proveedores, categorias]);
+  }, [proveedores, categorias]);
 
-
-const cargarListasBase = async () => {
+  const inicializar = async () => {
     try {
-      const db = await Database.load("sqlite:cd_electronica.db");
-      
-      // Categorías desde SQLite local (100% offline)
+      const db = await getDb();
       const cats = await db.select("SELECT * FROM categorias");
       setCategorias(cats);
-
-      // Locales fijos
       setLocales([{ id: 1, nombre: 'LOCAL 1' }, { id: 2, nombre: 'LOCAL 2' }]);
-
-      // Proveedores desde Supabase (si no hay internet, solo mostrará '-')
       try {
         const provs = await getProveedores();
         if (provs) setProveedores(provs);
@@ -165,39 +153,33 @@ const cargarListasBase = async () => {
         console.warn("Modo Offline: No se pudieron cargar los proveedores.");
       }
     } catch (err) {
-      console.error("Error cargando listas:", err);
+      console.error("Error inicializando:", err);
     }
   };
 
   useEffect(() => {
-    cargarListasBase();
+    const arrancar = async () => {
+      await inicializar();
+      setReady(true);
+    };
+    arrancar();
   }, []);
 
   useEffect(() => {
-    cargarStock();
-  }, [cargarStock]);
+    if (ready) cargarStock();
+  }, [ready, cargarStock]);
 
   useEffect(() => {
-  const cargarDolar = async () => {
-    const valor = await fetchDolar();
-    setCotizacion(valor);
-  };
-  
-  cargarDolar();
-}, []);
+    setPagina(1)
+  }, [filtroBusqueda, filtroCategoria, filtroProveedor, filtroMarca, filtroLocal])
 
   useEffect(() => {
-    cargarStock();
-  }, [cargarStock]);
-
-  useEffect(() => {
-  const cargarDolar = async () => {
-    const valor = await fetchDolar();
-    setCotizacion(valor); // Asumiendo que tenés un state para esto
-  };
-  
-  cargarDolar();
-}, []);
+    const cargarDolar = async () => {
+      const valor = await fetchDolar();
+      setCotizacion(valor);
+    };
+    cargarDolar();
+  }, []);
 
 const fetchDolar = async () => {
   try {
@@ -229,33 +211,11 @@ const fetchDolar = async () => {
   }
 };
 
-  const handleImportarExcel = async () => {
-    try {
-      setLoading(true)
-      toast('Seleccionando archivo...', 'success')
-      const result = await importarStockExcel({ cotizacion, usuarioId: usuario.id })
-      if (!result) {
-        toast('Importación cancelada', 'error')
-        return
-      }
-      const msg = `Importación: ${result.importados} nuevos, ${result.actualizados} actualizados, ${result.errores} errores de ${result.total} filas`
-      if (result.errores > 0 && result.detalles?.length) {
-        const detalle = result.detalles.slice(0, 3).map(d => `Fila ${d.fila}: ${d.error}`).join(' | ')
-        toast(msg + '. ' + detalle, 'error')
-      } else if (result.importados > 0 || result.actualizados > 0) {
-        toast(msg, 'success')
-      } else {
-        toast(msg, 'error')
-      }
-      if (result.importados > 0 || result.actualizados > 0) {
-        await cargarStock()
-      }
-    } catch (e) {
-      console.error('Error en importación:', e)
-      toast('Error al importar: ' + (e.message || 'desconocido'), 'error')
-    } finally {
-      setLoading(false)
-    }
+  const handleBusqueda = (e) => {
+    const v = e.target.value
+    setBusqueda(v)
+    clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => setFiltroBusqueda(v), 300)
   }
 
   const handleSort = (key) => {
@@ -282,16 +242,24 @@ const fetchDolar = async () => {
     }
   }
 
-  const marcasUnicas = [...new Set(stock.map(p => p.marca).filter(Boolean))].sort()
+  const marcasUnicas = useMemo(
+    () => [...new Set(stock.map(p => p.marca).filter(Boolean))].sort(),
+    [stock]
+  )
 
-  const listaAMostrar = stock.map(p => {
+  const stockFiltrado = useMemo(() => stock.map(p => {
     const costoRegulable = (p.precio_costo_usd || 0) * cotizacion
     return {
       ...p,
       costo_reg: costoRegulable,
+      costo_mas_100: (p.precio_costo || 0) * 2,
       precio_promo: p.precio_promo || 0,
     }
   }).filter(p => {
+    if (filtroBusqueda) {
+      const t = filtroBusqueda.toLowerCase()
+      if (!(p.nombre?.toLowerCase().includes(t) || p.marca?.toLowerCase().includes(t) || p.modelo?.toLowerCase().includes(t))) return false
+    }
     if (filtroCategoria && String(p.categoria_id) !== String(filtroCategoria)) return false
     if (filtroProveedor && String(p.proveedor_id) !== String(filtroProveedor)) return false
     if (filtroMarca && p.marca !== filtroMarca) return false
@@ -304,7 +272,13 @@ const fetchDolar = async () => {
     if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
     if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
     return 0;
-  });
+  }), [stock, filtroBusqueda, filtroCategoria, filtroProveedor, filtroMarca, filtroLocal, sortConfig, cotizacion])
+
+  const totalPaginas = Math.max(1, Math.ceil(stockFiltrado.length / POR_PAGINA))
+  const listaAMostrar = useMemo(() => {
+    const inicio = (pagina - 1) * POR_PAGINA
+    return stockFiltrado.slice(inicio, inicio + POR_PAGINA)
+  }, [stockFiltrado, pagina])
 
   const cerrarModal = () => {
     setModal(null)
@@ -331,12 +305,7 @@ const fetchDolar = async () => {
               PROVEEDORES
             </button>
           )}
-          {esAdmin && (
-            <button onClick={handleImportarExcel} disabled={loading} title="Importar stock desde archivo Excel" style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.4 : 1 }}>
-              📥 IMPORTAR EXCEL
-            </button>
-          )}
-          <button onClick={() => { console.log('Stock a exportar:', listaAMostrar?.length || 0); exportarStockExcel(listaAMostrar); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
+          <button onClick={() => { console.log('Stock a exportar:', stockFiltrado?.length || 0); exportarStockExcel(stockFiltrado); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
             📊 EXCEL
           </button>
           {esAdmin && (
@@ -367,7 +336,7 @@ const fetchDolar = async () => {
 
       {/* FILTROS */}
       <div style={{ display: 'flex', gap: 10, background: UI.cardBg, padding: 15, borderRadius: 12, border: '1px solid #ddd' }}>
-        <input placeholder="Buscar..." value={busqueda} onChange={e => setBusqueda(e.target.value)} style={{ flex: 2, padding: 10, borderRadius: 8, border: '1px solid #ccc' }} />
+        <input placeholder="Buscar..." value={busqueda} onChange={handleBusqueda} style={{ flex: 2, padding: 10, borderRadius: 8, border: '1px solid #ccc' }} />
         <select value={filtroLocal} onChange={e => setFiltroLocal(e.target.value)} style={{ flex: 1, padding: 10 }}>
           <option value="">Locales</option>
           {locales.map(l => <option key={l.id} value={l.id}>{l.nombre}</option>)}
@@ -389,7 +358,7 @@ const fetchDolar = async () => {
       {/* TABLA */}
       <div style={{ flex: 1, overflow: 'auto', background: UI.cardBg, border: '1px solid #ddd', borderRadius: 12 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-          <thead style={{ background: UI.theadBg, color: UI.theadText }}>
+          <thead style={{ position: 'sticky', top: 0, zIndex: 2, background: UI.theadBg, color: UI.theadText }}>
             <tr>
               <SortableTh label="PRODUCTO" field="nombre" sortConfig={sortConfig} onSort={handleSort} />
               <SortableTh label="MARCA" field="marca" sortConfig={sortConfig} onSort={handleSort} />
@@ -398,7 +367,7 @@ const fetchDolar = async () => {
               {esAdmin && (
                 <>
                   <SortableTh label="COSTO FIJO." field="precio_costo" sortConfig={sortConfig} onSort={handleSort} align="right" />
-                  <SortableTh label="COSTO REG." field="costo_reg" sortConfig={sortConfig} onSort={handleSort} align="right" />
+                  <SortableTh label="CON EL 100%" field="costo_mas_100" sortConfig={sortConfig} onSort={handleSort} align="right" />
                   <SortableTh label="PROVEEDOR" field="proveedor_nombre" sortConfig={sortConfig} onSort={handleSort} />
                 </>
               )}
@@ -434,7 +403,7 @@ const fetchDolar = async () => {
                   {esAdmin && (
                     <>
                       <td align="right" style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{fmt(p.precio_costo)}</td>
-                      <td align="right" style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{fmt(p.costo_reg)}</td>
+                      <td align="right" style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{fmt(p.costo_mas_100)}</td>
                       <td style={{ color: sinStockTotal ? '#9ca3af' : 'inherit' }}>{p.proveedor_nombre}</td>
                     </>
                   )}
@@ -457,6 +426,45 @@ const fetchDolar = async () => {
             })}
           </tbody>
         </table>
+      </div>
+
+      {/* PAGINACIÓN */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0' }}>
+        <span style={{ fontSize: 13, color: '#666' }}>
+          {stockFiltrado.length} artículos · Pág. {pagina} de {totalPaginas}
+        </span>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <button disabled={pagina <= 1} onClick={() => setPagina(p => Math.max(1, p - 1))} style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #ccc', background: pagina <= 1 ? '#f0f0f0' : '#fff', cursor: pagina <= 1 ? 'default' : 'pointer', fontWeight: 700, fontSize: 12 }}>
+            ◀
+          </button>
+          {(() => {
+            const maxVisible = 7
+            let inicio = Math.max(1, pagina - Math.floor(maxVisible / 2))
+            let fin = Math.min(totalPaginas, inicio + maxVisible - 1)
+            if (fin - inicio + 1 < maxVisible) inicio = Math.max(1, fin - maxVisible + 1)
+            const pages = []
+            if (inicio > 1) pages.push({ n: 1, label: '1' }, { n: -1, label: '...' })
+            for (let i = inicio; i <= fin; i++) pages.push({ n: i, label: String(i) })
+            if (fin < totalPaginas) pages.push({ n: -2, label: '...' }, { n: totalPaginas, label: String(totalPaginas) })
+            return pages.map(p => 
+              p.n < 0 ? (
+                <span key={p.label} style={{ padding: '6px 4px', fontSize: 12, color: '#999' }}>{p.label}</span>
+              ) : (
+                <button key={p.n} onClick={() => setPagina(p.n)} disabled={p.n === pagina} style={{
+                  padding: '6px 10px', borderRadius: 6, border: p.n === pagina ? '2px solid #2196f3' : '1px solid #ddd',
+                  background: p.n === pagina ? '#e3f2fd' : '#fff',
+                  color: p.n === pagina ? '#1565c0' : '#333',
+                  cursor: 'pointer', fontWeight: p.n === pagina ? 800 : 400, fontSize: 12
+                }}>
+                  {p.label}
+                </button>
+              )
+            )
+          })()}
+          <button disabled={pagina >= totalPaginas} onClick={() => setPagina(p => Math.min(totalPaginas, p + 1))} style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #ccc', background: pagina >= totalPaginas ? '#f0f0f0' : '#fff', cursor: pagina >= totalPaginas ? 'default' : 'pointer', fontWeight: 700, fontSize: 12 }}>
+            ▶
+          </button>
+        </div>
       </div>
 
       <StockModales

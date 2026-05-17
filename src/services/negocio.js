@@ -59,12 +59,16 @@ export async function guardarCategoria(categoria) {
   if (categoria.id) payload.id = categoria.id;
   const { data, error } = await supabase.from('categorias').upsert(payload).select().single();
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("INSERT OR REPLACE INTO categorias (id, nombre) VALUES (?, ?)", [data.id, data.nombre]);
   return data;
 }
 
 export async function eliminarCategoria(id) {
   const { error } = await supabase.from('categorias').delete().eq('id', id);
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("DELETE FROM categorias WHERE id = ?", [id]);
 }
 
 /**
@@ -94,6 +98,11 @@ export async function guardarProveedor(proveedor) {
   if (proveedor.id) payload.id = proveedor.id;
   const { data, error } = await supabase.from('proveedores').upsert(payload).select().single();
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute(
+    "INSERT OR REPLACE INTO proveedores (id, nombre, contacto, telefono, email, direccion, activo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [data.id, data.nombre, data.contacto, data.telefono, data.email, data.direccion, data.activo ? 1 : 0]
+  );
   return data;
 }
 
@@ -101,6 +110,9 @@ export async function eliminarProveedor(id) {
   await supabase.from('productos').update({ proveedor_id: null }).eq('proveedor_id', id);
   const { error } = await supabase.from('proveedores').delete().eq('id', id);
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("UPDATE productos SET proveedor_id = NULL WHERE proveedor_id = ?", [id]);
+  await db.execute("DELETE FROM proveedores WHERE id = ?", [id]);
 }
 
 /**
@@ -141,10 +153,25 @@ export async function getProductos({ busqueda = '', categoriaId = null } = {}) {
 }
 
 export async function crearProducto(data) {
+  // 0. GENERAR CÓDIGO NUMÉRICO si no viene uno
+  if (!data.codigo) {
+    try {
+      const { data: ultimo } = await supabase
+        .from('productos')
+        .select('id')
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      data.codigo = String(ultimo ? ultimo.id + 1 : 1)
+    } catch {
+      data.codigo = String(Date.now())
+    }
+  }
+
   // 1. INSERTAR CABECERA DE PRODUCTO EN SUPABASE
   const { data: p, error: errorProd } = await supabase.from('productos').insert({
     nombre: data.nombre.trim(),
-    codigo: data.codigo || `PRD${Date.now()}`,
+    codigo: data.codigo,
     marca: data.marca || null,
     modelo: data.modelo || null,
     precio_venta: parseFloat(data.precio_venta || 0),
@@ -528,10 +555,26 @@ export async function getGastos(desde, hasta) {
   try {
     const { data, error } = await supabase.from('gastos').select('*').gte('fecha', desde).lte('fecha', hasta).order('fecha', { ascending: false });
     if (error) throw error;
-    if (data) localStorage.setItem('cd_gastos_cache', JSON.stringify(data));
+    if (data) {
+      const db = await Database.load("sqlite:cd_electronica.db");
+      for (const g of data) {
+        await db.execute(
+          "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+          [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id]
+        );
+      }
+    }
     return data || [];
   } catch (error) {
-    if (checkOfflineError(error)) return JSON.parse(localStorage.getItem('cd_gastos_cache') || '[]');
+    if (checkOfflineError(error)) {
+      const db = await Database.load("sqlite:cd_electronica.db");
+      let sql = "SELECT * FROM gastos WHERE 1=1";
+      let params = [];
+      if (desde) { sql += " AND fecha >= ?"; params.push(desde); }
+      if (hasta) { sql += " AND fecha <= ?"; params.push(hasta); }
+      sql += " ORDER BY fecha DESC";
+      return await db.select(sql, params);
+    }
     throw error;
   }
 }
@@ -579,11 +622,18 @@ export async function actualizarGasto(id, cambios) {
   };
   const { error } = await supabase.from('gastos').update(payload).eq('id', id);
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute(
+    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ? WHERE id = ?",
+    [payload.fecha, payload.descripcion, payload.monto, payload.categoria, payload.local_id, payload.usuario_id, id]
+  );
 }
 
 export async function eliminarGasto(id) {
   const { error } = await supabase.from('gastos').delete().eq('id', id);
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("DELETE FROM gastos WHERE id = ?", [id]);
 }
 
 /**
@@ -593,10 +643,21 @@ export async function getNotas() {
   try {
     const { data, error } = await supabase.from('notas').select('*').order('created_at', { ascending: false })
     if (error) throw error
-    if (data) localStorage.setItem('cd_notas_cache', JSON.stringify(data));
+    if (data) {
+      const db = await Database.load("sqlite:cd_electronica.db");
+      for (const n of data) {
+        await db.execute(
+          "INSERT OR REPLACE INTO notas (id, titulo, contenido, usuario_id, created_at) VALUES (?, ?, ?, ?, ?)",
+          [n.id, n.titulo, n.contenido, n.usuario_id, n.created_at]
+        );
+      }
+    }
     return data || []
   } catch (error) {
-    if (checkOfflineError(error)) return JSON.parse(localStorage.getItem('cd_notas_cache') || '[]');
+    if (checkOfflineError(error)) {
+      const db = await Database.load("sqlite:cd_electronica.db");
+      return await db.select("SELECT * FROM notas ORDER BY created_at DESC");
+    }
     throw error;
   }
 }
@@ -604,12 +665,19 @@ export async function getNotas() {
 export async function guardarNota({ titulo, contenido, usuario_id }) {
   const { data, error } = await supabase.from('notas').insert([{ titulo, contenido, usuario_id }]).select().single()
   if (error) throw error
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute(
+    "INSERT INTO notas (id, titulo, contenido, usuario_id, created_at) VALUES (?, ?, ?, ?, ?)",
+    [data.id, data.titulo, data.contenido, data.usuario_id, data.created_at]
+  );
   return data
 }
 
 export async function eliminarNota(id) {
   const { error } = await supabase.from('notas').delete().eq('id', id)
   if (error) throw error
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("DELETE FROM notas WHERE id = ?", [id]);
 }
 
 /**
@@ -629,7 +697,7 @@ export async function getReparaciones(busqueda = '') {
     }
 
     const data = await db.select(sql, params);
-    return data;
+    return data.map(r => ({ ...r, total: r.costo }));
   } catch (error) {
     console.error("Error leyendo reparaciones de SQLite:", error);
     return [];
@@ -638,13 +706,11 @@ export async function getReparaciones(busqueda = '') {
 
 export async function guardarReparacion(reparacion) {
   const db = await Database.load("sqlite:cd_electronica.db");
-  
-  // Mapeamos los campos del modal a las columnas reales de tu tabla
+
   const payload = {
     fecha: reparacion.fecha || new Date().toISOString(),
     cliente: reparacion.cliente?.trim(),
     equipo: reparacion.equipo?.trim(),
-    // Unificamos toda la info técnica en la columna 'problema' para no perder datos
     problema: `
 MARCA/MODELO: ${reparacion.marca || ''} ${reparacion.modelo || ''}
 FALLA: ${reparacion.problema || ''}
@@ -652,45 +718,45 @@ ACCESORIOS: ${reparacion.accesorios || ''}
 TRABAJO: ${reparacion.arreglo || ''}
     `.trim(),
     estado: reparacion.id ? (reparacion.estado || 'Pendiente') : 'Pendiente',
-    costo: parseFloat(reparacion.total || 0) // Tu tabla usa 'costo', el modal usa 'total'
+    costo: parseFloat(reparacion.total || 0),
+    tecnico_id: reparacion.tecnico_id ? parseInt(reparacion.tecnico_id) : null
   };
 
+  // 1. Guardar primero en SQLite local (siempre funciona)
+  const id = reparacion.id || Date.now()
+  await db.execute(`
+    INSERT OR REPLACE INTO reparaciones (
+      id, cliente, equipo, problema, estado, costo, fecha, tecnico_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, payload.cliente, payload.equipo, payload.problema, payload.estado, payload.costo, payload.fecha, payload.tecnico_id]
+  );
+
+  // 2. Intentar en Supabase (si falla, el local ya quedó guardado)
   try {
-    // 1. Guardar en Supabase
     const { data, error } = await supabase
       .from('reparaciones')
-      .upsert(reparacion.id ? { ...payload, id: reparacion.id } : payload)
+      .upsert(reparacion.id ? { ...payload, id: reparacion.id } : { ...payload, id })
       .select()
       .single();
 
-    if (error) throw error;
-
-    // 2. Sincronizar con SQLite local
-    // Asegurate de que tu tabla local tenga las mismas columnas que la nube
-    await db.execute(`
-      INSERT OR REPLACE INTO reparaciones (
-        id, cliente, equipo, problema, estado, costo, fecha
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        data.id, 
-        data.cliente, 
-        data.equipo, 
-        data.problema, 
-        data.estado, 
-        data.costo, 
-        data.fecha
-      ]
-    );
-
-    return data;
-  } catch (error) {
-    console.error("Error en guardarReparacion:", error);
-    throw error;
+    if (!error && data && data.id && !reparacion.id) {
+      // Si es nuevo y Supabase generó otro id, actualizamos el local
+      await db.execute("UPDATE reparaciones SET id = ? WHERE id = ?", [data.id, id]);
+    }
+  } catch (e) {
+    console.warn("Supabase no disponible, guardado solo local:", e.message);
   }
+
+  return { id, ...payload };
 }
 export async function eliminarReparacion(id) {
-  const { error } = await supabase.from('reparaciones').delete().eq('id', id);
-  if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("DELETE FROM reparaciones WHERE id = ?", [id]);
+  try {
+    await supabase.from('reparaciones').delete().eq('id', id);
+  } catch (e) {
+    console.warn("Supabase no disponible al eliminar reparacion:", e.message);
+  }
 }
 
 export async function getClientes(busqueda = '') {
@@ -748,6 +814,8 @@ export async function guardarCliente(cliente) {
 export async function eliminarCliente(id) {
   const { error } = await supabase.from('clientes').delete().eq('id', id);
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("DELETE FROM clientes WHERE id = ?", [id]);
 }
 
 /**
@@ -770,6 +838,11 @@ export async function crearUsuario({ username, password, rol, local_id, nombre }
   const hash = await hashPassword(password);
   const { data, error } = await supabase.from('usuarios').insert([{ username, password_hash: hash, rol, local_id, nombre, activo: true }]).select().single();
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute(
+    "INSERT OR REPLACE INTO usuarios (id, username, nombre, local_id, rol, activo) VALUES (?, ?, ?, ?, ?, ?)",
+    [data.id, data.username, data.nombre, data.local_id, data.rol, 1]
+  );
   return data;
 }
 
@@ -781,10 +854,23 @@ export async function actualizarUsuario(id, cambios) {
   }
   const { error } = await supabase.from('usuarios').update(datosAActualizar).eq('id', id);
   if (error) throw error;
+  const db = await Database.load("sqlite:cd_electronica.db");
+  const fields = [];
+  const params = [];
+  if (cambios.nombre !== undefined) { fields.push("nombre = ?"); params.push(cambios.nombre); }
+  if (cambios.rol !== undefined) { fields.push("rol = ?"); params.push(cambios.rol); }
+  if (cambios.local_id !== undefined) { fields.push("local_id = ?"); params.push(cambios.local_id); }
+  if (cambios.activo !== undefined) { fields.push("activo = ?"); params.push(cambios.activo ? 1 : 0); }
+  if (fields.length > 0) {
+    params.push(id);
+    await db.execute(`UPDATE usuarios SET ${fields.join(", ")} WHERE id = ?`, params);
+  }
 }
 
 export async function eliminarUsuario(id) {
   await supabase.from('usuarios').update({ activo: false }).eq('id', id);
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("UPDATE usuarios SET activo = 0 WHERE id = ?", [id]);
 }
 
 /**
@@ -1040,9 +1126,35 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
         problema TEXT,
         estado TEXT,
         costo REAL DEFAULT 0,
-        fecha TEXT
+        fecha TEXT,
+        tecnico_id INTEGER
     );
 `);
+        // Migración: agregar tecnico_id si no existe (bases viejas)
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN tecnico_id INTEGER"); } catch (e) {}
+
+        // --- TABLA TECNICOS ---
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS tecnicos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                telefono TEXT,
+                especialidad TEXT
+            );
+        `);
+        // --- TABLA PROVEEDORES ---
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS proveedores (
+                id INTEGER PRIMARY KEY,
+                nombre TEXT NOT NULL,
+                contacto TEXT,
+                telefono TEXT,
+                email TEXT,
+                direccion TEXT,
+                activo INTEGER DEFAULT 1
+            );
+        `);
+
         // --- TABLA PRODUCTOS ---
         await db.execute(`
             CREATE TABLE IF NOT EXISTS productos (
@@ -1167,6 +1279,17 @@ await db.execute(`
             );
         `);
 
+        // --- TABLA NOTAS ---
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS notas (
+                id INTEGER PRIMARY KEY,
+                titulo TEXT,
+                contenido TEXT,
+                usuario_id INTEGER,
+                created_at TEXT
+            );
+        `);
+
         // --- ÍNDICES PARA PERFORMANCE ---
         await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_codigo ON productos(codigo);");
         await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_nombre ON productos(nombre);");
@@ -1194,12 +1317,24 @@ export async function sincronizarTablasMaestras() {
         const { data: cats, error: errCats } = await supabase.from('categorias').select('*');
         if (errCats) throw errCats;
         if (cats) {
-            // Limpiar locales eliminados en la nube
             await db.execute("DELETE FROM categorias");
             for (const c of cats) {
                 await db.execute(
                     "INSERT OR REPLACE INTO categorias (id, nombre) VALUES (?, ?)", 
                     [c.id, c.nombre]
+                );
+            }
+        }
+
+        // 2b. Sincronizar Proveedores
+        const { data: provs, error: errProvs } = await supabase.from('proveedores').select('*');
+        if (errProvs) throw errProvs;
+        if (provs) {
+            await db.execute("DELETE FROM proveedores");
+            for (const p of provs) {
+                await db.execute(
+                    "INSERT OR REPLACE INTO proveedores (id, nombre, contacto, telefono, email, direccion, activo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [p.id, p.nombre, p.contacto, p.telefono, p.email, p.direccion, p.activo ? 1 : 0]
                 );
             }
         }
@@ -1287,4 +1422,39 @@ export async function procesarVentasPendientes() {
     } catch (err) {
         console.error("Error general en el proceso de ventas pendientes:", err);
     }
+}
+
+/**
+ * TECNICOS
+ */
+export async function getTecnicos() {
+  const db = await Database.load("sqlite:cd_electronica.db");
+  return await db.select("SELECT * FROM tecnicos ORDER BY nombre");
+}
+
+export async function guardarTecnico(data) {
+  const db = await Database.load("sqlite:cd_electronica.db");
+  if (data.id) {
+    await db.execute("UPDATE tecnicos SET nombre = ?, telefono = ?, especialidad = ? WHERE id = ?",
+      [data.nombre.trim(), data.telefono || null, data.especialidad || null, data.id]);
+  } else {
+    const r = await db.execute("INSERT INTO tecnicos (nombre, telefono, especialidad) VALUES (?, ?, ?)",
+      [data.nombre.trim(), data.telefono || null, data.especialidad || null]);
+    data.id = r.lastInsertId;
+  }
+  return data;
+}
+
+export async function eliminarTecnico(id) {
+  const db = await Database.load("sqlite:cd_electronica.db");
+  await db.execute("UPDATE reparaciones SET tecnico_id = NULL WHERE tecnico_id = ?", [id]);
+  await db.execute("DELETE FROM tecnicos WHERE id = ?", [id]);
+}
+
+export async function getReparacionesPorTecnico(tecnicoId) {
+  const db = await Database.load("sqlite:cd_electronica.db");
+  return await db.select(
+    "SELECT id, cliente, equipo, problema, estado, costo, fecha FROM reparaciones WHERE tecnico_id = ? ORDER BY fecha DESC",
+    [tecnicoId]
+  );
 }

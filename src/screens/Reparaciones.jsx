@@ -1,6 +1,9 @@
 import { useState, useEffect, useMemo } from 'react'
 import { getReparaciones, guardarReparacion, eliminarReparacion } from '../services/negocio'
-import { Icon, toast, Badge } from '../components/UI'
+import { Icon, toast } from '../components/UI'
+import { supabase } from '../supabase'
+import Database from '@tauri-apps/plugin-sql'
+import Tecnicos from './Tecnicos'
 
 const UI = {
   headerBg: '#1f2937', 
@@ -18,6 +21,7 @@ export default function Reparaciones() {
   const [loading, setLoading] = useState(false)
   const [modal, setModal] = useState({ show: false, data: null })
   const [sortConfig, setSortConfig] = useState({ field: 'fecha', direction: 'desc' })
+  const [showTecnicos, setShowTecnicos] = useState(false)
 
   const estadoInicial = { 
     fecha: new Date().toISOString().split('T')[0],
@@ -55,10 +59,22 @@ export default function Reparaciones() {
   }, [items, sortConfig])
 
   const abrirModal = (reparacion = null) => {
-    setModal({
-      show: true,
-      data: reparacion ? { ...reparacion } : { ...estadoInicial }
-    })
+    const data = reparacion ? { ...reparacion } : { ...estadoInicial }
+    if (reparacion && reparacion.problema) {
+      const p = reparacion.problema
+      const mm = p.match(/^MARCA\/MODELO:\s*(.*?)\s*$/m)
+      const fa = p.match(/^FALLA:\s*(.*?)\s*$/m)
+      const ac = p.match(/^ACCESORIOS:\s*(.*?)\s*$/m)
+      const tr = p.match(/^TRABAJO:\s*(.*?)\s*$/m)
+      if (mm || fa || ac || tr) {
+        data.marca = mm ? mm[1].trim().split(/\s+/)[0] || '' : reparacion.marca || ''
+        data.modelo = mm ? mm[1].trim().split(/\s+/).slice(1).join(' ') || '' : reparacion.modelo || ''
+        data.problema = fa ? fa[1].trim() : ''
+        data.accesorios = ac ? ac[1].trim() : ''
+        data.arreglo = tr ? tr[1].trim() : ''
+      }
+    }
+    setModal({ show: true, data })
   }
 
   const cerrarModal = () => setModal({ show: false, data: null })
@@ -81,10 +97,23 @@ export default function Reparaciones() {
     }
   };
 
-  const handleEliminar = async (id) => {
-    if (window.confirm('¿Eliminar registro?')) {
-      try { await eliminarReparacion(id); cargar(); toast("Eliminado") } 
-      catch (err) { toast("Error", "error") }
+  const handleEliminar = async (id, cliente) => {
+    alert(`ATENCIÓN: Vas a eliminar la orden de "${cliente}". Esta acción no se puede deshacer.`);
+    if (!window.confirm(`¿Confirmas eliminar la orden de "${cliente}"?`)) return
+    try { await eliminarReparacion(id); cargar(); toast("Eliminado") } 
+    catch (err) { toast("Error", "error") }
+  }
+
+  const handleCambiarEstado = async (id, nuevoEstado) => {
+    if (!nuevoEstado) return
+    try {
+      const { error } = await supabase.from('reparaciones').update({ estado: nuevoEstado }).eq('id', id)
+      if (error) throw error
+      const db = await Database.load("sqlite:cd_electronica.db")
+      await db.execute("UPDATE reparaciones SET estado = ? WHERE id = ?", [nuevoEstado, id])
+      setItems(prev => prev.map(r => r.id === id ? { ...r, estado: nuevoEstado } : r))
+    } catch (err) {
+      toast("Error al actualizar estado", "error")
     }
   }
 
@@ -113,6 +142,7 @@ export default function Reparaciones() {
             style={styles.busqueda}
           />
           <button onClick={() => abrirModal()} style={styles.btnNuevo}>+ NUEVA REPARACIÓN</button>
+          <button onClick={() => setShowTecnicos(true)} style={{ ...styles.btnNuevo, background: '#6b7280', display: 'flex', alignItems: 'center', gap: 6 }}><Icon name="group" size={16} /> TÉCNICOS</button>
         </div>
       </div>
 
@@ -143,12 +173,23 @@ export default function Reparaciones() {
                 <td style={styles.td}>{r.marca || '-'}</td>
                 <td style={styles.td}>{r.modelo || '-'}</td>
                 <td style={styles.td}>
-                  <Badge color={r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : '#6b7280'}>{r.estado || 'Pendiente'}</Badge>
+                  <select value={r.estado || 'Pendiente'} onChange={e => handleCambiarEstado(r.id, e.target.value)}
+                    style={{
+                      padding: '4px 6px', borderRadius: 6, border: '1px solid #ccc',
+                      fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                      color: r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : '#6b7280',
+                      background: r.estado === 'Entregado' ? '#f0fdf4' : r.estado === 'En Progreso' ? '#eff6ff' : r.estado === 'Completado' ? '#fffbeb' : '#f9fafb',
+                    }}>
+                    <option value="Pendiente">Pendiente</option>
+                    <option value="En Progreso">En Progreso</option>
+                    <option value="Completado">Completado</option>
+                    <option value="Entregado">Entregado</option>
+                  </select>
                 </td>
                 <td style={{ ...styles.td, fontWeight: 800 }}>{fmt(r.total)}</td>
                 <td style={{ ...styles.td, textAlign: 'center' }}>
                   <button onClick={() => abrirModal(r)} style={styles.btnAction}><Icon name="tune" color={UI.accent} size={18} /></button>
-                  <button onClick={() => handleEliminar(r.id)} style={styles.btnAction}><Icon name="trash" color="#ef4444" size={18} /></button>
+                  <button onClick={() => handleEliminar(r.id, r.cliente)} style={styles.btnAction}><Icon name="trash" color="#ef4444" size={18} /></button>
                 </td>
               </tr>
             ))}
@@ -244,6 +285,15 @@ export default function Reparaciones() {
                 {loading ? 'PROCESANDO...' : modal.data.id ? 'ACTUALIZAR ORDEN' : 'REGISTRAR INGRESO'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL TÉCNICOS */}
+      {showTecnicos && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#f3f4f6', borderRadius: 12, width: '90%', height: '90%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <Tecnicos onClose={() => setShowTecnicos(false)} />
           </div>
         </div>
       )}
