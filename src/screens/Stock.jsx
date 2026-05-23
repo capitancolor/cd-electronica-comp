@@ -305,6 +305,7 @@ const fetchDolar = async () => {
               PROVEEDORES
             </button>
           )}
+
           <button onClick={() => { console.log('Stock a exportar:', stockFiltrado?.length || 0); exportarStockExcel(stockFiltrado); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
             📊 EXCEL
           </button>
@@ -349,10 +350,7 @@ const fetchDolar = async () => {
           <option value="">Proveedores</option>
           {proveedores.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
         </select>
-        <select value={filtroMarca} onChange={e => setFiltroMarca(e.target.value)} style={{ flex: 1, padding: 10 }}>
-          <option value="">Marcas</option>
-          {marcasUnicas.map(m => <option key={m} value={m}>{m}</option>)}
-        </select>
+
       </div>
 
       {/* TABLA */}
@@ -418,6 +416,7 @@ const fetchDolar = async () => {
                   <td>
                     <div style={{ display: 'flex', gap: 4, padding: '4px' }}>
                       {esAdmin && (<ActionIconButton color="#555" title="Editar" onClick={() => setModal({ tipo: 'editar', item: p })}><Icon name="tune" /></ActionIconButton>)}
+                      <ActionIconButton color="#e65100" title="Transferir" onClick={() => setModal({ tipo: 'transferir', item: p })}><Icon name="transfer" /></ActionIconButton>
                       {esAdmin && (<ActionIconButton color="#d32f2f" title="Eliminar" onClick={() => handleEliminar(p)}><Icon name="trash" /></ActionIconButton>)}
                     </div>
                   </td>
@@ -478,6 +477,7 @@ const fetchDolar = async () => {
         setCategorias={setCategorias} 
         setProveedores={setProveedores}
         setStock={setStock}
+        stock={stock}
       />
     </div>
   )

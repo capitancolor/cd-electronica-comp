@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
 import { toast, Icon } from '../components/UI'
 import { crearProducto, getCategorias, getProveedores } from '../services/negocio'
@@ -17,7 +17,7 @@ export default function StockModales({
   modal, cerrarModal, formMov, setFormMov, formNuevo, setFormNuevo,
   loading, setLoading, locales, proveedores, categorias,
   cotizacion, setModal, usuario, cargarStock, setCategorias, 
-  setProveedores, setStock
+  setProveedores, setStock, stock
 }) {
   const [nuevoMaestro, setNuevoMaestro] = useState({ nombre: '', contacto: '', telefono: '', mail: '', direccion: '' })
   const [idEditando, setIdEditando] = useState(null)
@@ -41,6 +41,74 @@ export default function StockModales({
   const cancelarEdicion = () => {
     setIdEditando(null)
     setNuevoMaestro({ nombre: '', contacto: '', telefono: '', mail: '', direccion: '' })
+  }
+
+  // --- TRANSFERENCIA DE STOCK ---
+  const [transfer, setTransfer] = useState({ producto_id: '', desde: '1', hacia: '2', cantidad: '' })
+  const [busquedaTransfer, setBusquedaTransfer] = useState('')
+
+  useEffect(() => {
+    if (modal.tipo === 'transferir' && modal.item) {
+      setTransfer(prev => ({ ...prev, producto_id: String(modal.item.id) }))
+    }
+  }, [modal])
+
+  const handleTransferir = async () => {
+    const prodId = parseInt(transfer.producto_id)
+    const desde = parseInt(transfer.desde)
+    const hacia = parseInt(transfer.hacia)
+    const cantidad = parseInt(transfer.cantidad)
+
+    if (!prodId) return toast('Seleccioná un producto', 'error')
+    if (desde === hacia) return toast('Los locales deben ser distintos', 'error')
+    if (!cantidad || cantidad <= 0) return toast('Ingresá una cantidad válida', 'error')
+
+    setLoading(true)
+    try {
+      const db = await Database.load("sqlite:cd_electronica.db")
+      const [producto] = await db.select("SELECT * FROM productos WHERE id = ?", [prodId])
+      if (!producto) return toast('Producto no encontrado', 'error')
+
+      const stockDesde = desde === 1 ? (producto.stock_l1 || 0) : (producto.stock_l2 || 0)
+      if (stockDesde < cantidad) return toast(`Stock insuficiente en LOCAL ${desde} (disponible: ${stockDesde})`, 'error')
+
+      const nuevoStockDesde = stockDesde - cantidad
+      const stockHacia = desde === 1 ? (producto.stock_l2 || 0) : (producto.stock_l1 || 0)
+      const nuevoStockHacia = stockHacia + cantidad
+
+      if (desde === 1) {
+        await db.execute("UPDATE productos SET stock_l1 = ?, stock_l2 = ? WHERE id = ?", [nuevoStockDesde, nuevoStockHacia, prodId])
+      } else {
+        await db.execute("UPDATE productos SET stock_l1 = ?, stock_l2 = ? WHERE id = ?", [nuevoStockHacia, nuevoStockDesde, prodId])
+      }
+
+      await supabase.from('productos').update({
+        stock_l1: desde === 1 ? nuevoStockDesde : nuevoStockHacia,
+        stock_l2: desde === 1 ? nuevoStockHacia : nuevoStockDesde
+      }).eq('id', prodId)
+
+      await supabase.from('stock').upsert({ producto_id: prodId, local_id: desde, cantidad: nuevoStockDesde })
+      await supabase.from('stock').upsert({ producto_id: prodId, local_id: hacia, cantidad: nuevoStockHacia })
+
+      await supabase.from('movimientos_stock').insert({
+        producto_id: prodId, local_id: desde, tipo: 'salida', cantidad,
+        referencia: `Transferencia a Local ${hacia}`, usuario_id: usuario?.id
+      })
+      await supabase.from('movimientos_stock').insert({
+        producto_id: prodId, local_id: hacia, tipo: 'entrada', cantidad,
+        referencia: `Transferencia desde Local ${desde}`, usuario_id: usuario?.id
+      })
+
+      toast(`Transferidos ${cantidad} unidades de LOCAL ${desde} → LOCAL ${hacia}`)
+      setTransfer({ producto_id: '', desde: '1', hacia: '2', cantidad: '' })
+      setBusquedaTransfer('')
+      cerrarModal()
+      cargarStock()
+    } catch (e) {
+      toast('Error al transferir: ' + e.message, 'error')
+    } finally {
+      setLoading(false)
+    }
   }
 
   // --- GESTIÓN DE MAESTROS (CATEGORÍAS / PROVEEDORES) ---
@@ -191,7 +259,7 @@ export default function StockModales({
                     {idEditando ? 'EDITANDO REGISTRO SELECCIONADO' : `CARGAR NUEVA ${modal.tipo.toUpperCase()}`}
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: modal.tipo === 'proveedores' ? '1fr 1fr' : '1fr', gap: 10 }}>
-                  <input placeholder="Nombre / Razón Social" value={nuevoMaestro.nombre} onChange={e => setNuevoMaestro({...nuevoMaestro, nombre: e.target.value})} style={{ padding: 10, borderRadius: 6, border: '1px solid #ccc', color: '#000', fontWeight: 600 }} />
+                  <input placeholder="Nombre" value={nuevoMaestro.nombre} onChange={e => setNuevoMaestro({...nuevoMaestro, nombre: e.target.value})} style={{ padding: 10, borderRadius: 6, border: '1px solid #ccc', color: '#000', fontWeight: 600 }} />
                   {modal.tipo === 'proveedores' && (
                     <>
                       <input placeholder="Contacto / Vendedor" value={nuevoMaestro.contacto} onChange={e => setNuevoMaestro({...nuevoMaestro, contacto: e.target.value})} style={{ padding: 10, borderRadius: 6, border: '1px solid #ccc', color: '#000' }} />
@@ -370,9 +438,75 @@ export default function StockModales({
     {proveedores.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
   </select>
 </div>
-              <button onClick={handleGuardarProducto} className="btn-primary" disabled={loading} style={{ padding: 15, fontWeight: 800, fontSize: 14, textTransform: 'uppercase', marginTop: 10 }}>
+               <button onClick={handleGuardarProducto} className="btn-primary" disabled={loading} style={{ padding: 15, fontWeight: 800, fontSize: 14, textTransform: 'uppercase', marginTop: 10 }}>
                 {isEdit ? '💾 GUARDAR CAMBIOS' : '🚀 CREAR PRODUCTO'}
               </button>
+            </>
+          )}
+
+          {modal.tipo === 'transferir' && (
+            <>
+              <div style={{ background: '#fff3e0', padding: 15, borderRadius: 10, border: '1px solid #ffb74d', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: '#e65100', marginBottom: 5 }}>
+                  TRANSFERENCIA DE STOCK ENTRE LOCALES
+                </div>
+
+                <div>
+                  <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Buscar Producto</label>
+                  <input
+                    placeholder="Escribí para filtrar..."
+                    value={busquedaTransfer}
+                    onChange={e => { setBusquedaTransfer(e.target.value); setTransfer({...transfer, producto_id: ''}) }}
+                    style={{ width: '100%', padding: 10, border: '1px solid #ccc', borderRadius: 6, color: '#000', marginBottom: 6 }}
+                  />
+                  <select
+                    value={transfer.producto_id}
+                    onChange={e => setTransfer({...transfer, producto_id: e.target.value})}
+                    style={{ width: '100%', padding: 10, border: '1px solid #ff9800', borderRadius: 6, color: '#000', fontWeight: 700, background: '#fff' }}
+                  >
+                    <option value="">— Seleccionar producto —</option>
+                    {stock
+                      .filter(p => !busquedaTransfer || p.nombre?.toLowerCase().includes(busquedaTransfer.toLowerCase()) || p.marca?.toLowerCase().includes(busquedaTransfer.toLowerCase()))
+                      .map(p => (
+                        <option key={p.id} value={p.id}>
+                          {p.nombre} {p.marca ? `(${p.marca})` : ''} — L1: {p.stock_l1 ?? 0} / L2: {p.stock_l2 ?? 0}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div>
+                    <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Desde Local</label>
+                    <select value={transfer.desde} onChange={e => setTransfer({...transfer, desde: e.target.value, hacia: e.target.value === '1' ? '2' : '1'})} style={{ width: '100%', padding: 10, border: '1px solid #ccc', borderRadius: 6, fontWeight: 700 }}>
+                      <option value="1">LOCAL 1</option>
+                      <option value="2">LOCAL 2</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Hacia Local</label>
+                    <select value={transfer.hacia} onChange={e => setTransfer({...transfer, hacia: e.target.value})} style={{ width: '100%', padding: 10, border: '1px solid #ccc', borderRadius: 6, fontWeight: 700 }}>
+                      <option value="1">LOCAL 1</option>
+                      <option value="2">LOCAL 2</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Cantidad a Transferir</label>
+                  <input
+                    type="number" min="1"
+                    placeholder="0"
+                    value={transfer.cantidad}
+                    onChange={e => setTransfer({...transfer, cantidad: e.target.value})}
+                    style={{ width: '100%', padding: 10, border: '1px solid #ff9800', borderRadius: 6, fontWeight: 700, fontSize: 16 }}
+                  />
+                </div>
+
+                <button onClick={handleTransferir} disabled={loading} style={{ padding: 14, fontWeight: 800, fontSize: 14, background: '#e65100', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', textTransform: 'uppercase' }}>
+                  {loading ? 'TRANSFIRIENDO...' : '⟳ CONFIRMAR TRANSFERENCIA'}
+                </button>
+              </div>
             </>
           )}
 
