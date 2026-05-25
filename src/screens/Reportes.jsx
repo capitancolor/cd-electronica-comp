@@ -287,7 +287,9 @@ export default function Reportes({ usuario }) {
             </select>
           )}
           <SoftButton onClick={generar} disabled={loading} bg={UI.primaryBtnBg} text={UI.primaryBtnText} style={{ padding: '8px 12px' }}><Icon name="refresh" size={16} /></SoftButton>
-          <SoftButton onClick={() => exportarProductosExcel(ventas)} disabled={ventas.length === 0} bg="#ffffff" text="#111" border="#000" style={{ padding: '8px 12px' }}><Icon name="receipt" size={16} /></SoftButton>
+          <button onClick={() => exportarProductosExcel(ventas)} disabled={ventas.length === 0} title="Exportar Ventas a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: ventas.length === 0 ? 'not-allowed' : 'pointer', opacity: ventas.length === 0 ? 0.4 : 1 }}>
+            📊 EXCEL
+          </button>
         </div>
       </div>
 

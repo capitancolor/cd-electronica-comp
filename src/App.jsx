@@ -20,7 +20,7 @@ const NAV = [
   { id: 'reportes',     label: 'Ventas',       icon: 'reports',  roles: ['admin'] },
   { id: 'amortizacion', label: 'Gastos',       icon: 'reports',  roles: ['admin'] },
   { id: 'reparaciones', label: 'Reparaciones', icon: 'stock',    roles: ['admin', 'vendedor'] },
-  { id: 'clientes',     label: 'Clientes',     icon: 'stock',    roles: ['admin', 'vendedor'] }, 
+  { id: 'clientes',     label: 'Clientes',     icon: 'stock',    roles: ['admin'] }, 
   { id: 'notas',        label: 'Notas',        icon: 'stock',     roles: ['admin'] },
   { id: 'usuarios',     label: 'Usuarios',     icon: 'eye',      roles: ['admin'] },
 ]

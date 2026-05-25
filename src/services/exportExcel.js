@@ -24,11 +24,13 @@ export async function exportarProductosExcel(ventas = []) {
 
     // Extraer todos los items de productos de todas las ventas
     const productosMap = new Map()
+    let tieneItems = false
     
     ventas.forEach(v => {
       const local = v.local_nombre || ''
       
-      if (v.venta_items && Array.isArray(v.venta_items)) {
+      if (v.venta_items && Array.isArray(v.venta_items) && v.venta_items.length > 0) {
+        tieneItems = true
         v.venta_items.forEach(item => {
           const productoId = item.producto_id || item.id || Math.random()
           const nombre = item.nombre || item.productos?.nombre || item.descripcion || 'Sin nombre'
@@ -62,6 +64,49 @@ export async function exportarProductosExcel(ventas = []) {
     })
     
     const filas = Array.from(productosMap.values())
+    
+    // Fallback: si no hay items detallados, exportar cada venta como una fila
+    if (!tieneItems) {
+      const filasVenta = ventas.map(v => ({
+        'Fecha': new Date(v.fecha).toLocaleDateString('es-AR'),
+        'Productos': v.productos_nombres || '',
+        'Local': v.local_nombre || '',
+        'Método de Pago': v.metodo_pago || '',
+        'Costo Total': Number(v.costo_total || 0),
+        'Total': Number(v.total || 0),
+        'Ganancia': Number(v.total || 0) - Number(v.costo_total || 0)
+      }))
+
+      const total = filasVenta.reduce((s, r) => s + Number(r['Total'] || 0), 0)
+      const costo = filasVenta.reduce((s, r) => s + Number(r['Costo Total'] || 0), 0)
+      filasVenta.push({
+        'Fecha': '', 'Productos': 'TOTAL', 'Local': '', 'Método de Pago': '',
+        'Costo Total': costo, 'Total': total, 'Ganancia': total - costo
+      })
+
+      const ws = XLSX.utils.json_to_sheet(filasVenta)
+      ws["!cols"] = [
+        { wch: 14 }, { wch: 50 }, { wch: 10 }, { wch: 18 },
+        { wch: 14 }, { wch: 14 }, { wch: 14 }
+      ]
+
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, "Ventas")
+
+      const buffer = XLSX.write(wb, { bookType: "xlsx", type: "array" })
+      const uint8Array = numberArrayToUint8Array(buffer)
+
+      const filePath = await save({
+        title: 'Guardar reporte de ventas',
+        defaultPath: `reporte_ventas_${new Date().toISOString().slice(0,10)}.xlsx`,
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }]
+      })
+
+      if (!filePath) { return false }
+      await writeFile(filePath, uint8Array)
+      alert("Archivo Excel guardado correctamente en:\n" + filePath)
+      return true
+    }
     
     // Separar por local
     const local1 = filas.filter(f => f['Local'] === 'Local 1')

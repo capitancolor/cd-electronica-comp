@@ -22,6 +22,18 @@ export default function StockModales({
   const [nuevoMaestro, setNuevoMaestro] = useState({ nombre: '', contacto: '', telefono: '', mail: '', direccion: '' })
   const [idEditando, setIdEditando] = useState(null)
 
+  // --- TRANSFERENCIA DE STOCK ---
+  const [transfer, setTransfer] = useState({ desde: '1', hacia: '2', cantidad: '' })
+
+  useEffect(() => {
+    if (!modal) return
+    if (modal.tipo === 'transferir' && modal.item) {
+      const desde = String(modal.item.stock_l1 > 0 ? 1 : 2)
+      const hacia = desde === '1' ? '2' : '1'
+      setTransfer({ desde, hacia, cantidad: '' })
+    }
+  }, [modal])
+
   if (!modal) return null
 
   const isEdit = modal.tipo === 'editar'
@@ -43,37 +55,26 @@ export default function StockModales({
     setNuevoMaestro({ nombre: '', contacto: '', telefono: '', mail: '', direccion: '' })
   }
 
-  // --- TRANSFERENCIA DE STOCK ---
-  const [transfer, setTransfer] = useState({ producto_id: '', desde: '1', hacia: '2', cantidad: '' })
-  const [busquedaTransfer, setBusquedaTransfer] = useState('')
-
-  useEffect(() => {
-    if (modal.tipo === 'transferir' && modal.item) {
-      setTransfer(prev => ({ ...prev, producto_id: String(modal.item.id) }))
-    }
-  }, [modal])
-
   const handleTransferir = async () => {
-    const prodId = parseInt(transfer.producto_id)
+    const prodId = parseInt(modal.item.id)
     const desde = parseInt(transfer.desde)
     const hacia = parseInt(transfer.hacia)
     const cantidad = parseInt(transfer.cantidad)
 
-    if (!prodId) return toast('Seleccioná un producto', 'error')
+    if (!prodId) return toast('Producto inválido', 'error')
     if (desde === hacia) return toast('Los locales deben ser distintos', 'error')
     if (!cantidad || cantidad <= 0) return toast('Ingresá una cantidad válida', 'error')
+
+    const prod = modal.item
+    const stockDesde = desde === 1 ? (prod.stock_l1 || 0) : (prod.stock_l2 || 0)
+    if (stockDesde < cantidad) return toast(`Stock insuficiente en LOCAL ${desde} (disponible: ${stockDesde})`, 'error')
 
     setLoading(true)
     try {
       const db = await Database.load("sqlite:cd_electronica.db")
-      const [producto] = await db.select("SELECT * FROM productos WHERE id = ?", [prodId])
-      if (!producto) return toast('Producto no encontrado', 'error')
-
-      const stockDesde = desde === 1 ? (producto.stock_l1 || 0) : (producto.stock_l2 || 0)
-      if (stockDesde < cantidad) return toast(`Stock insuficiente en LOCAL ${desde} (disponible: ${stockDesde})`, 'error')
 
       const nuevoStockDesde = stockDesde - cantidad
-      const stockHacia = desde === 1 ? (producto.stock_l2 || 0) : (producto.stock_l1 || 0)
+      const stockHacia = desde === 1 ? (prod.stock_l2 || 0) : (prod.stock_l1 || 0)
       const nuevoStockHacia = stockHacia + cantidad
 
       if (desde === 1) {
@@ -100,8 +101,7 @@ export default function StockModales({
       })
 
       toast(`Transferidos ${cantidad} unidades de LOCAL ${desde} → LOCAL ${hacia}`)
-      setTransfer({ producto_id: '', desde: '1', hacia: '2', cantidad: '' })
-      setBusquedaTransfer('')
+      setTransfer({ desde: '1', hacia: '2', cantidad: '' })
       cerrarModal()
       cargarStock()
     } catch (e) {
@@ -446,34 +446,19 @@ export default function StockModales({
 
           {modal.tipo === 'transferir' && (
             <>
-              <div style={{ background: '#fff3e0', padding: 15, borderRadius: 10, border: '1px solid #ffb74d', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: '#e65100', marginBottom: 5 }}>
-                  TRANSFERENCIA DE STOCK ENTRE LOCALES
-                </div>
+                <div style={{ background: '#e8f0fe', padding: 15, borderRadius: 10, border: '1px solid #1A73E8', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: '#1A73E8', marginBottom: 5 }}>
+                    TRANSFERENCIA DE STOCK ENTRE LOCALES
+                  </div>
 
-                <div>
-                  <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Buscar Producto</label>
-                  <input
-                    placeholder="Escribí para filtrar..."
-                    value={busquedaTransfer}
-                    onChange={e => { setBusquedaTransfer(e.target.value); setTransfer({...transfer, producto_id: ''}) }}
-                    style={{ width: '100%', padding: 10, border: '1px solid #ccc', borderRadius: 6, color: '#000', marginBottom: 6 }}
-                  />
-                  <select
-                    value={transfer.producto_id}
-                    onChange={e => setTransfer({...transfer, producto_id: e.target.value})}
-                    style={{ width: '100%', padding: 10, border: '1px solid #ff9800', borderRadius: 6, color: '#000', fontWeight: 700, background: '#fff' }}
-                  >
-                    <option value="">— Seleccionar producto —</option>
-                    {stock
-                      .filter(p => !busquedaTransfer || p.nombre?.toLowerCase().includes(busquedaTransfer.toLowerCase()) || p.marca?.toLowerCase().includes(busquedaTransfer.toLowerCase()))
-                      .map(p => (
-                        <option key={p.id} value={p.id}>
-                          {p.nombre} {p.marca ? `(${p.marca})` : ''} — L1: {p.stock_l1 ?? 0} / L2: {p.stock_l2 ?? 0}
-                        </option>
-                      ))}
-                  </select>
-                </div>
+                  <div style={{ background: '#fff', borderRadius: 8, padding: 12, border: '1px solid #ccc' }}>
+                    <div style={{ fontWeight: 800, fontSize: 15, color: '#000' }}>{modal.item?.nombre || 'S/N'}</div>
+                    {modal.item?.marca && <div style={{ fontSize: 12, color: '#666' }}>{modal.item.marca}</div>}
+                    <div style={{ display: 'flex', gap: 20, marginTop: 8, fontSize: 13 }}>
+                      <span><b>L1:</b> {modal.item?.stock_l1 ?? 0}</span>
+                      <span><b>L2:</b> {modal.item?.stock_l2 ?? 0}</span>
+                    </div>
+                  </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div>
@@ -499,11 +484,11 @@ export default function StockModales({
                     placeholder="0"
                     value={transfer.cantidad}
                     onChange={e => setTransfer({...transfer, cantidad: e.target.value})}
-                    style={{ width: '100%', padding: 10, border: '1px solid #ff9800', borderRadius: 6, fontWeight: 700, fontSize: 16 }}
+                    style={{ width: '100%', padding: 10, border: '1px solid #1A73E8', borderRadius: 6, fontWeight: 700, fontSize: 16 }}
                   />
                 </div>
 
-                <button onClick={handleTransferir} disabled={loading} style={{ padding: 14, fontWeight: 800, fontSize: 14, background: '#e65100', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', textTransform: 'uppercase' }}>
+                <button onClick={handleTransferir} disabled={loading} style={{ padding: 14, fontWeight: 800, fontSize: 14, background: '#1A73E8', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', textTransform: 'uppercase' }}>
                   {loading ? 'TRANSFIRIENDO...' : '⟳ CONFIRMAR TRANSFERENCIA'}
                 </button>
               </div>

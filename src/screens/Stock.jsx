@@ -4,6 +4,7 @@ import { supabase } from '../supabase'
 import { eliminarProducto, getProveedores } from '../services/negocio' // Quitamos getStock, getLocales y getCategorias
 import { Icon, toast } from '../components/UI'
 import StockModales from './StockModales'
+import ErrorBoundary from '../components/ErrorBoundary'
 import { exportarStockExcel } from '../services/exportExcel'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
@@ -466,19 +467,21 @@ const fetchDolar = async () => {
         </div>
       </div>
 
-      <StockModales
-        modal={modal} cerrarModal={cerrarModal}
-        formMov={formMov} setFormMov={setFormMov}
-        formNuevo={formNuevo} setFormNuevo={setFormNuevo}
-        loading={loading} setLoading={setLoading}
-        locales={locales} proveedores={proveedores} categorias={categorias}
-        cotizacion={cotizacion} setModal={setModal} usuario={usuario}
-        cargarStock={cargarStock}
-        setCategorias={setCategorias} 
-        setProveedores={setProveedores}
-        setStock={setStock}
-        stock={stock}
-      />
+      <ErrorBoundary>
+        <StockModales
+          modal={modal} cerrarModal={cerrarModal}
+          formMov={formMov} setFormMov={setFormMov}
+          formNuevo={formNuevo} setFormNuevo={setFormNuevo}
+          loading={loading} setLoading={setLoading}
+          locales={locales} proveedores={proveedores} categorias={categorias}
+          cotizacion={cotizacion} setModal={setModal} usuario={usuario}
+          cargarStock={cargarStock}
+          setCategorias={setCategorias} 
+          setProveedores={setProveedores}
+          setStock={setStock}
+          stock={stock}
+        />
+      </ErrorBoundary>
     </div>
   )
 }
