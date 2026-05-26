@@ -107,11 +107,14 @@ export default function Reparaciones() {
   const handleCambiarEstado = async (id, nuevoEstado) => {
     if (!nuevoEstado) return
     try {
-      const { error } = await supabase.from('reparaciones').update({ estado: nuevoEstado }).eq('id', id)
-      if (error) throw error
       const db = await Database.load("sqlite:cd_electronica.db")
       await db.execute("UPDATE reparaciones SET estado = ? WHERE id = ?", [nuevoEstado, id])
       setItems(prev => prev.map(r => r.id === id ? { ...r, estado: nuevoEstado } : r))
+      try {
+        await supabase.from('reparaciones').update({ estado: nuevoEstado }).eq('id', id)
+      } catch (e) {
+        console.warn("Supabase no disponible al cambiar estado:", e.message)
+      }
     } catch (err) {
       toast("Error al actualizar estado", "error")
     }

@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx"
-import { save } from '@tauri-apps/plugin-dialog'
-import { writeFile } from '@tauri-apps/plugin-fs'
+import { save, open } from '@tauri-apps/plugin-dialog'
+import { writeFile, readFile } from '@tauri-apps/plugin-fs'
 
 function numberArrayToUint8Array(arr) {
   return new Uint8Array(arr)
@@ -319,5 +319,35 @@ export async function exportarStockExcel(productos = []) {
       alert("Error al exportar: " + msg)
     }
     return false
+  }
+}
+
+export async function importarStockExcel() {
+  try {
+    const filePath = await open({
+      title: 'Seleccionar archivo Excel',
+      filters: [{ name: 'Excel', extensions: ['xlsx', 'xls'] }],
+      multiple: false,
+    })
+
+    if (!filePath) return null
+
+    const uint8Array = await readFile(filePath)
+    const workbook = XLSX.read(uint8Array, { type: 'array' })
+    const sheetName = workbook.SheetNames[0]
+    const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName])
+
+    if (!data || data.length === 0) {
+      alert("El archivo Excel está vacío o no tiene datos en la primera hoja.")
+      return null
+    }
+
+    return data
+  } catch (error) {
+    console.error("Error importando Excel:", error)
+    if (error.message !== 'canceled') {
+      alert("Error al importar: " + error.message)
+    }
+    return null
   }
 }

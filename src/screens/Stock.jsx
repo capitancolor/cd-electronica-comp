@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import Database from '@tauri-apps/plugin-sql' // <-- IMPORTANTE: Agregar esto
-import { supabase } from '../supabase'
-import { eliminarProducto, getProveedores } from '../services/negocio' // Quitamos getStock, getLocales y getCategorias
+import Database from '@tauri-apps/plugin-sql'
+import { eliminarProducto, getProveedores, importarProductosDesdeExcel } from '../services/negocio'
 import { Icon, toast } from '../components/UI'
 import StockModales from './StockModales'
 import ErrorBoundary from '../components/ErrorBoundary'
-import { exportarStockExcel } from '../services/exportExcel'
+import { exportarStockExcel, importarStockExcel } from '../services/exportExcel'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
 
@@ -288,6 +287,24 @@ const fetchDolar = async () => {
     setLoading(false)
   }
 
+  const handleImportarExcel = async () => {
+    const data = await importarStockExcel()
+    if (!data || data.length === 0) return
+
+    setLoading(true)
+    try {
+      const importados = await importarProductosDesdeExcel(data, usuario.id)
+      if (importados > 0) {
+        toast(`${importados} productos importados correctamente`)
+        await cargarStock()
+      }
+    } catch (err) {
+      toast("Error al importar: " + err.message, "error")
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 15, background: UI.pageBg, padding: 15, color: UI.textMain }}>
 
@@ -310,6 +327,11 @@ const fetchDolar = async () => {
           <button onClick={() => { console.log('Stock a exportar:', stockFiltrado?.length || 0); exportarStockExcel(stockFiltrado); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
             📊 EXCEL
           </button>
+          {esAdmin && (
+            <button onClick={handleImportarExcel} disabled={loading} title="Importar productos desde Excel" style={{ background: '#f59e0b', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
+              📥 IMPORTAR EXCEL
+            </button>
+          )}
           {esAdmin && (
             <button onClick={() => setModal({ tipo: 'nuevo' })} className="btn-primary" style={{ padding: '8px 20px', fontWeight: 800, borderRadius: 8 }}>
               + NUEVO PRODUCTO

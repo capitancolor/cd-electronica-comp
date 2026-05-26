@@ -12,7 +12,7 @@ import Notas from './screens/Notas'
 import Clientes from './screens/Clientes' 
 import Reparaciones from './screens/Reparaciones'
 // MonitorPrecios removed
-import { inicializarBaseLocal, sincronizarTablasMaestras, procesarVentasPendientes } from './services/negocio';
+import { inicializarBaseLocal, sincronizarTablasMaestras, procesarVentasPendientes, procesarProductosPendientes } from './services/negocio';
 
 const NAV = [
   { id: 'ventas',       label: 'Nueva Venta',  icon: 'computer', roles: ['admin', 'vendedor'] },
@@ -49,14 +49,15 @@ const ejecutarSincroCompleta = async () => {
     try {
       console.log("🔄 Sincronización: Intentando subir ventas...");
       
-      // PASO 1: PUSH. 
-      // Si procesarVentasPendientes falla por DNS (el error que me mostraste),
-      // tirará una excepción y el código NO pasará al Paso 2.
-      await procesarVentasPendientes(); 
+      // PASO 1: PUSH - Ventas offline
+      await procesarVentasPendientes();
       console.log("⬆️ Ventas subidas correctamente.");
 
-      // PASO 2: PULL. 
-      // Solo se ejecuta si el Paso 1 fue exitoso.
+      // PASO 2: PUSH - Productos importados offline
+      await procesarProductosPendientes();
+      console.log("⬆️ Productos importados sincronizados.");
+
+      // PASO 3: PULL - Traer datos actualizados de la nube
       await sincronizarTablasMaestras();
       console.log("⬇️ Stock actualizado desde la nube.");
 

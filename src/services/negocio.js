@@ -271,6 +271,193 @@ export async function eliminarProducto(id) {
   return { ok: true };
 }
 
+export async function importarProductosDesdeExcel(data, usuario_id) {
+  if (!data || data.length === 0) return 0
+
+  const db = await Database.load("sqlite:cd_electronica.db")
+
+  const existentes = await db.select("SELECT id, codigo FROM productos WHERE activo = 1 AND codigo IS NOT NULL AND codigo != ''")
+  const porCodigo = {}
+  for (const p of existentes) porCodigo[p.codigo.toString().trim()] = p.id
+
+  let categorias = []
+  try {
+    categorias = await db.select("SELECT * FROM categorias")
+  } catch (e) { console.warn("No se pudieron cargar categorías:", e.message) }
+
+  let proveedores = []
+  try {
+    proveedores = await db.select("SELECT * FROM proveedores")
+  } catch (e) { console.warn("No se pudieron cargar proveedores:", e.message) }
+
+  const normalizar = (row, keys) => {
+    for (const k of keys) {
+      const v = row[k]
+      if (v !== undefined && v !== null && v !== '') return v
+    }
+    return null
+  }
+
+  let importados = 0
+
+  for (const row of data) {
+    const nombre = normalizar(row, ['Producto', 'producto', 'NOMBRE', 'nombre', 'PRODUCTO'])
+    if (!nombre) continue
+
+    const codigo = String(normalizar(row, ['Codigo', 'codigo', 'CÓDIGO', 'CODIGO', 'Código']) || '').trim()
+    const marca = normalizar(row, ['Marca', 'marca', 'MARCA']) || ''
+    const modelo = normalizar(row, ['Modelo', 'modelo', 'MODELO']) || ''
+    const categoria_nombre = normalizar(row, ['Categoria', 'categoria', 'CATEGORIA', 'Categoría', 'categoría']) || ''
+    const proveedor_nombre = normalizar(row, ['Proveedor', 'proveedor', 'PROVEEDOR']) || ''
+    const precio_costo = parseFloat(normalizar(row, ['Precio Costo', 'precio_costo', 'PRECIO COSTO']) || 0)
+    const precio_costo_usd = parseFloat(normalizar(row, ['Precio Costo USD', 'precio_costo_usd', 'PRECIO COSTO USD', 'Costo USD', 'costo_usd']) || 0)
+    const precio_venta = parseFloat(normalizar(row, ['Precio Venta', 'precio_venta', 'PRECIO VENTA']) || 0)
+    const precio_promo = parseFloat(normalizar(row, ['Precio Promo', 'precio_promo', 'PRECIO PROMO', 'Precio Promoción']) || 0)
+    const en_promo = normalizar(row, ['En Promo', 'en_promo', 'EN PROMO', 'Promo', 'promo']) === 'SI' || false
+    const s1 = parseInt(normalizar(row, ['Stock L1', 'stock_l1', 'STOCK L1', 'Stock Local 1']) || 0)
+    const s2 = parseInt(normalizar(row, ['Stock L2', 'stock_l2', 'STOCK L2', 'Stock Local 2']) || 0)
+
+    // Resolver categoría por nombre
+    let categoria_id = null
+    if (categoria_nombre) {
+      const cat = categorias.find(c => c.nombre.toLowerCase() === categoria_nombre.toLowerCase())
+      if (cat) {
+        categoria_id = cat.id
+      } else {
+        try {
+          const nueva = await guardarCategoria({ nombre: categoria_nombre })
+          categoria_id = nueva.id
+          categorias.push(nueva)
+        } catch (e) {
+          console.warn("No se pudo crear categoría:", categoria_nombre, e.message)
+        }
+      }
+    }
+
+    // Resolver proveedor por nombre
+    let proveedor_id = null
+    if (proveedor_nombre) {
+      const prov = proveedores.find(p => p.nombre.toLowerCase() === proveedor_nombre.toLowerCase())
+      if (prov) {
+        proveedor_id = prov.id
+      } else {
+        try {
+          const nuevo = await guardarProveedor({ nombre: proveedor_nombre })
+          proveedor_id = nuevo.id
+          proveedores.push(nuevo)
+        } catch (e) {
+          console.warn("No se pudo crear proveedor:", proveedor_nombre, e.message)
+        }
+      }
+    }
+
+    // Buscar si ya existe por codigo
+    const existenteId = codigo ? porCodigo[codigo] : null
+
+    if (existenteId) {
+      // UPDATE: preserva el id original
+      await db.execute(
+        `UPDATE productos SET
+          nombre = ?, marca = ?, modelo = ?,
+          precio_costo = ?, precio_costo_usd = ?,
+          precio_venta = ?, precio_promo = ?, en_promo = ?,
+          categoria_id = ?, proveedor_id = ?,
+          stock_l1 = ?, stock_l2 = ?
+         WHERE id = ?`,
+        [nombre, marca, modelo,
+         precio_costo, precio_costo_usd,
+         precio_venta, precio_promo, en_promo ? 1 : 0,
+         categoria_id, proveedor_id,
+         s1, s2, existenteId]
+      )
+
+      // Supabase: actualizar producto existente
+      let supabaseOk = false
+      try {
+        const { error: errProd } = await supabase.from('productos').update({
+          nombre, marca, modelo,
+          precio_costo, precio_costo_usd, precio_venta, precio_promo,
+          en_promo: !!en_promo, categoria_id, proveedor_id, activo: true
+        }).eq('id', existenteId)
+        if (!errProd) {
+          const stocks = []
+          if (s1 > 0) stocks.push({ producto_id: existenteId, local_id: 1, cantidad: s1 })
+          if (s2 > 0) stocks.push({ producto_id: existenteId, local_id: 2, cantidad: s2 })
+          if (stocks.length > 0) {
+            const { error: errSt } = await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
+            if (!errSt) supabaseOk = true
+          } else {
+            supabaseOk = true
+          }
+        }
+      } catch (e) {
+        console.warn("Supabase no disponible:", e.message)
+      }
+
+      if (!supabaseOk) {
+        await db.execute(
+          "INSERT INTO productos_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+          [JSON.stringify({ id: existenteId, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd, precio_venta, precio_promo, en_promo: !!en_promo, categoria_id, proveedor_id, stock_l1: s1, stock_l2: s2, usuario_id }), new Date().toISOString()]
+        )
+      }
+    } else {
+      // INSERT: producto nuevo
+      const id = Date.now() + importados
+
+      await db.execute(
+        `INSERT INTO productos
+          (id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+           precio_venta, precio_promo, en_promo, categoria_id, proveedor_id,
+           stock_l1, stock_l2, activo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+         precio_venta, precio_promo, en_promo ? 1 : 0, categoria_id, proveedor_id,
+         s1, s2]
+      )
+
+      // Supabase: insertar producto nuevo
+      let supabaseOk = false
+      try {
+        const { error: errProd } = await supabase.from('productos').upsert({
+          id, codigo, nombre, marca, modelo,
+          precio_costo, precio_costo_usd, precio_venta, precio_promo,
+          en_promo: !!en_promo, categoria_id, proveedor_id, activo: true
+        })
+        if (!errProd) {
+          const stocks = []
+          if (s1 > 0) stocks.push({ producto_id: id, local_id: 1, cantidad: s1 })
+          if (s2 > 0) stocks.push({ producto_id: id, local_id: 2, cantidad: s2 })
+          if (stocks.length > 0) {
+            const { error: errSt } = await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
+            if (!errSt) {
+              const movimientos = []
+              if (s1 > 0) movimientos.push({ producto_id: id, local_id: 1, tipo: 'entrada', cantidad: s1, referencia: 'Importación Excel', usuario_id })
+              if (s2 > 0) movimientos.push({ producto_id: id, local_id: 2, tipo: 'entrada', cantidad: s2, referencia: 'Importación Excel', usuario_id })
+              if (movimientos.length > 0) await supabase.from('movimientos_stock').insert(movimientos)
+              supabaseOk = true
+            }
+          } else {
+            supabaseOk = true
+          }
+        }
+      } catch (e) {
+        console.warn("Supabase no disponible:", e.message)
+      }
+
+      if (!supabaseOk) {
+        await db.execute(
+          "INSERT INTO productos_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+          [JSON.stringify({ id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd, precio_venta, precio_promo, en_promo: !!en_promo, categoria_id, proveedor_id, stock_l1: s1, stock_l2: s2, usuario_id }), new Date().toISOString()]
+        )
+      }
+    }
+
+    importados++
+  }
+
+  return importados
+}
+
 /**
  * STOCK
  */
@@ -1060,6 +1247,48 @@ export async function procesarReparacionesPendientes() {
     } catch (err) { console.error("Error en procesarReparacionesPendientes:", err); }
 }
 
+export async function procesarProductosPendientes() {
+    if (!window.navigator.onLine) return;
+    try {
+        const db = await Database.load("sqlite:cd_electronica.db");
+        const pendientes = await db.select("SELECT * FROM productos_pendientes WHERE sincronizado = 0");
+
+        for (const row of pendientes) {
+            try {
+                const p = JSON.parse(row.payload);
+
+                const { error: errProd } = await supabase.from('productos').upsert({
+                    id: p.id, codigo: p.codigo, nombre: p.nombre,
+                    marca: p.marca, modelo: p.modelo,
+                    precio_costo: p.precio_costo, precio_costo_usd: p.precio_costo_usd,
+                    precio_venta: p.precio_venta, precio_promo: p.precio_promo,
+                    en_promo: p.en_promo, categoria_id: p.categoria_id,
+                    proveedor_id: p.proveedor_id, activo: true
+                })
+                if (errProd) continue
+
+                const stocks = []
+                if (p.stock_l1 > 0) stocks.push({ producto_id: p.id, local_id: 1, cantidad: p.stock_l1 })
+                if (p.stock_l2 > 0) stocks.push({ producto_id: p.id, local_id: 2, cantidad: p.stock_l2 })
+                if (stocks.length > 0) {
+                    const { error: errSt } = await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
+                    if (errSt) continue
+                }
+
+                const movimientos = []
+                if (p.stock_l1 > 0) movimientos.push({ producto_id: p.id, local_id: 1, tipo: 'entrada', cantidad: p.stock_l1, referencia: 'Importación Excel', usuario_id: p.usuario_id })
+                if (p.stock_l2 > 0) movimientos.push({ producto_id: p.id, local_id: 2, tipo: 'entrada', cantidad: p.stock_l2, referencia: 'Importación Excel', usuario_id: p.usuario_id })
+                if (movimientos.length > 0) {
+                    await supabase.from('movimientos_stock').insert(movimientos)
+                }
+
+                await db.execute("DELETE FROM productos_pendientes WHERE id = ?", [row.id])
+                console.log(`Producto pendiente ID ${row.id} (${p.nombre}) sincronizado.`)
+            } catch (err) { console.error("Error subiendo producto pendiente:", err) }
+        }
+    } catch (err) { console.error("Error en procesarProductosPendientes:", err) }
+}
+
 export async function sincronizarReparacionesMaestras() {
     try {
         const db = await Database.load("sqlite:cd_electronica.db");
@@ -1204,6 +1433,15 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
             );
             `);
 
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS productos_pendientes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                sincronizado INTEGER DEFAULT 0
+            );
+        `);
+
         // --- TABLA CLIENTES ---
         await db.execute(`
             CREATE TABLE IF NOT EXISTS clientes (
@@ -1347,6 +1585,67 @@ export async function sincronizarTablasMaestras() {
         if (errProds) throw errProds;
 
         if (prods) {
+            // ─── DEDUPLICAR: agrupar por codigo, fusionar stock, limpiar Supabase ───
+            const grupos = new Map()
+            for (const p of prods) {
+                const cod = p.codigo?.toString().trim()
+                if (!cod) continue
+                if (!grupos.has(cod)) grupos.set(cod, [])
+                grupos.get(cod).push(p)
+            }
+
+            for (const [cod, dups] of grupos) {
+                if (dups.length <= 1) continue
+                console.warn(`⚠️ Detectados ${dups.length} duplicados para codigo "${cod}". Fusionando...`)
+
+                // Ordenar por ID ascendente: el primero es el original
+                dups.sort((a, b) => a.id - b.id)
+                const keep = dups[0]
+                const toDelete = dups.slice(1)
+
+                // Fusionar stock: sumar cantidades de los duplicados al original
+                let s1 = keep.stock?.find(s => s.local_id === 1)?.cantidad || 0
+                let s2 = keep.stock?.find(s => s.local_id === 2)?.cantidad || 0
+                for (const dup of toDelete) {
+                    s1 += dup.stock?.find(s => s.local_id === 1)?.cantidad || 0
+                    s2 += dup.stock?.find(s => s.local_id === 2)?.cantidad || 0
+                }
+
+                // Actualizar stock del producto conservado en Supabase
+                try {
+                    const stocks = []
+                    if (s1 > 0) stocks.push({ producto_id: keep.id, local_id: 1, cantidad: s1 })
+                    if (s2 > 0) stocks.push({ producto_id: keep.id, local_id: 2, cantidad: s2 })
+                    if (stocks.length > 0) {
+                        await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
+                    }
+                } catch (e) { console.warn("Error actualizando stock fusionado:", e.message) }
+
+                // Eliminar duplicados de Supabase (producto + stock)
+                for (const dup of toDelete) {
+                    try { await supabase.from('stock').delete().eq('producto_id', dup.id) } catch (e) {}
+                    try { await supabase.from('productos').delete().eq('id', dup.id) } catch (e) {}
+                }
+
+                // Reemplazar en el array original
+                const idx = prods.indexOf(keep)
+                if (idx !== -1) {
+                    if (!keep.stock) keep.stock = []
+                    const setL1 = keep.stock.find(s => s.local_id === 1)
+                    const setL2 = keep.stock.find(s => s.local_id === 2)
+                    if (setL1) setL1.cantidad = s1
+                    else if (s1 > 0) keep.stock.push({ local_id: 1, cantidad: s1 })
+                    if (setL2) setL2.cantidad = s2
+                    else if (s2 > 0) keep.stock.push({ local_id: 2, cantidad: s2 })
+                }
+                // Eliminar los duplicados del array
+                for (const dup of toDelete) {
+                    const di = prods.indexOf(dup)
+                    if (di !== -1) prods.splice(di, 1)
+                }
+            }
+
+            // ─── SINCRONIZAR A SQLITE ───
             for (const p of prods) {
                 // BI-Logic: ¿Tengo este producto en la cola de salida (ventas pendientes)?
                 const enCola = await db.select(
@@ -1354,7 +1653,6 @@ export async function sincronizarTablasMaestras() {
                     [`%"producto_id":${p.id}%`]
                 );
 
-                // Si está en la cola, saltamos el REPLACE para no "mentirle" al vendedor con stock viejo
                 if (enCola.length > 0) {
                   console.log(`⚠️ Producto ${p.nombre} omitido en sincro por transacción pendiente.`);
                   continue;
