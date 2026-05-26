@@ -168,21 +168,35 @@ export async function crearProducto(data) {
     }
   }
 
-  // 1. INSERTAR CABECERA DE PRODUCTO EN SUPABASE
-  const { data: p, error: errorProd } = await supabase.from('productos').insert({
-    nombre: data.nombre.trim(),
-    codigo: data.codigo,
-    marca: data.marca || null,
-    modelo: data.modelo || null,
-    precio_venta: parseFloat(data.precio_venta || 0),
-    precio_costo: parseFloat(data.precio_costo || 0),
-    precio_costo_usd: parseFloat(data.precio_costo_usd || 0), // <--- Guardamos el USD
-    precio_promo: parseFloat(data.precio_promo || 0),
-    en_promo: Boolean(data.en_promo),
-    categoria_id: data.categoria_id ? parseInt(data.categoria_id) : null,
-    proveedor_id: data.proveedor_id ? parseInt(data.proveedor_id) : null,
-    activo: true
-  }).select().single();
+  // 1. INSERTAR CABECERA DE PRODUCTO EN SUPABASE (con reintento si hay duplicado)
+  let p, errorProd;
+  for (let intento = 0; intento < 5; intento++) {
+    const res = await supabase.from('productos').insert({
+      nombre: data.nombre.trim(),
+      codigo: data.codigo,
+      marca: data.marca || null,
+      modelo: data.modelo || null,
+      precio_venta: parseFloat(data.precio_venta || 0),
+      precio_costo: parseFloat(data.precio_costo || 0),
+      precio_costo_usd: parseFloat(data.precio_costo_usd || 0),
+      precio_promo: parseFloat(data.precio_promo || 0),
+      en_promo: Boolean(data.en_promo),
+      categoria_id: data.categoria_id ? parseInt(data.categoria_id) : null,
+      proveedor_id: data.proveedor_id ? parseInt(data.proveedor_id) : null,
+      activo: true
+    }).select().single();
+    p = res.data;
+    errorProd = res.error;
+
+    if (!errorProd) break;
+
+    const violacion = errorProd?.message?.includes('duplicate key')
+      || errorProd?.message?.includes('unique constraint')
+      || errorProd?.code === '23505';
+    if (!violacion) throw errorProd;
+
+    data.codigo = String(Date.now()) + String(Math.floor(Math.random() * 100));
+  }
 
   if (errorProd) throw errorProd;
 
@@ -402,49 +416,67 @@ export async function importarProductosDesdeExcel(data, usuario_id) {
       }
     } else {
       // INSERT: producto nuevo
-      const id = Date.now() + importados
-
-      await db.execute(
-        `INSERT INTO productos
-          (id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
-           precio_venta, precio_promo, en_promo, categoria_id, proveedor_id,
-           stock_l1, stock_l2, activo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-        [id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
-         precio_venta, precio_promo, en_promo ? 1 : 0, categoria_id, proveedor_id,
-         s1, s2]
-      )
-
-      // Supabase: insertar producto nuevo
+      let realId = null
       let supabaseOk = false
+
+      // Primero intentar upsert en Supabase por codigo (obtiene el id real)
       try {
-        const { error: errProd } = await supabase.from('productos').upsert({
-          id, codigo, nombre, marca, modelo,
-          precio_costo, precio_costo_usd, precio_venta, precio_promo,
-          en_promo: !!en_promo, categoria_id, proveedor_id, activo: true
-        })
-        if (!errProd) {
+        const { data: prod, error: errProd } = await supabase.from('productos')
+          .upsert({
+            codigo, nombre, marca, modelo,
+            precio_costo, precio_costo_usd, precio_venta, precio_promo,
+            en_promo: !!en_promo, categoria_id, proveedor_id, activo: true
+          }, { onConflict: 'codigo' })
+          .select('id')
+          .single()
+
+        if (!errProd && prod) {
+          realId = prod.id
+
           const stocks = []
-          if (s1 > 0) stocks.push({ producto_id: id, local_id: 1, cantidad: s1 })
-          if (s2 > 0) stocks.push({ producto_id: id, local_id: 2, cantidad: s2 })
+          if (s1 > 0) stocks.push({ producto_id: realId, local_id: 1, cantidad: s1 })
+          if (s2 > 0) stocks.push({ producto_id: realId, local_id: 2, cantidad: s2 })
           if (stocks.length > 0) {
             const { error: errSt } = await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
             if (!errSt) {
               const movimientos = []
-              if (s1 > 0) movimientos.push({ producto_id: id, local_id: 1, tipo: 'entrada', cantidad: s1, referencia: 'Importación Excel', usuario_id })
-              if (s2 > 0) movimientos.push({ producto_id: id, local_id: 2, tipo: 'entrada', cantidad: s2, referencia: 'Importación Excel', usuario_id })
+              if (s1 > 0) movimientos.push({ producto_id: realId, local_id: 1, tipo: 'entrada', cantidad: s1, referencia: 'Importación Excel', usuario_id })
+              if (s2 > 0) movimientos.push({ producto_id: realId, local_id: 2, tipo: 'entrada', cantidad: s2, referencia: 'Importación Excel', usuario_id })
               if (movimientos.length > 0) await supabase.from('movimientos_stock').insert(movimientos)
-              supabaseOk = true
             }
-          } else {
-            supabaseOk = true
           }
+          supabaseOk = true
         }
       } catch (e) {
         console.warn("Supabase no disponible:", e.message)
       }
 
-      if (!supabaseOk) {
+      if (supabaseOk && realId) {
+        await db.execute(
+          `INSERT INTO productos
+            (id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+             precio_venta, precio_promo, en_promo, categoria_id, proveedor_id,
+             stock_l1, stock_l2, activo)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          [realId, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+           precio_venta, precio_promo, en_promo ? 1 : 0, categoria_id, proveedor_id,
+           s1, s2]
+        )
+        porCodigo[codigo] = realId
+      } else {
+        const id = Date.now() + importados
+
+        await db.execute(
+          `INSERT INTO productos
+            (id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+             precio_venta, precio_promo, en_promo, categoria_id, proveedor_id,
+             stock_l1, stock_l2, activo)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          [id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+           precio_venta, precio_promo, en_promo ? 1 : 0, categoria_id, proveedor_id,
+           s1, s2]
+        )
+
         await db.execute(
           "INSERT INTO productos_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
           [JSON.stringify({ id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd, precio_venta, precio_promo, en_promo: !!en_promo, categoria_id, proveedor_id, stock_l1: s1, stock_l2: s2, usuario_id }), new Date().toISOString()]
@@ -1257,30 +1289,49 @@ export async function procesarProductosPendientes() {
             try {
                 const p = JSON.parse(row.payload);
 
-                const { error: errProd } = await supabase.from('productos').upsert({
-                    id: p.id, codigo: p.codigo, nombre: p.nombre,
-                    marca: p.marca, modelo: p.modelo,
-                    precio_costo: p.precio_costo, precio_costo_usd: p.precio_costo_usd,
-                    precio_venta: p.precio_venta, precio_promo: p.precio_promo,
-                    en_promo: p.en_promo, categoria_id: p.categoria_id,
-                    proveedor_id: p.proveedor_id, activo: true
-                })
-                if (errProd) continue
+                const { data: prod, error: errProd } = await supabase.from('productos')
+                    .upsert({
+                        codigo: p.codigo, nombre: p.nombre,
+                        marca: p.marca, modelo: p.modelo,
+                        precio_costo: p.precio_costo, precio_costo_usd: p.precio_costo_usd,
+                        precio_venta: p.precio_venta, precio_promo: p.precio_promo,
+                        en_promo: p.en_promo, categoria_id: p.categoria_id,
+                        proveedor_id: p.proveedor_id, activo: true
+                    }, { onConflict: 'codigo' })
+                    .select('id')
+                    .single()
+
+                if (errProd || !prod) continue
+                const realId = prod.id
 
                 const stocks = []
-                if (p.stock_l1 > 0) stocks.push({ producto_id: p.id, local_id: 1, cantidad: p.stock_l1 })
-                if (p.stock_l2 > 0) stocks.push({ producto_id: p.id, local_id: 2, cantidad: p.stock_l2 })
+                if (p.stock_l1 > 0) stocks.push({ producto_id: realId, local_id: 1, cantidad: p.stock_l1 })
+                if (p.stock_l2 > 0) stocks.push({ producto_id: realId, local_id: 2, cantidad: p.stock_l2 })
                 if (stocks.length > 0) {
                     const { error: errSt } = await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
                     if (errSt) continue
                 }
 
                 const movimientos = []
-                if (p.stock_l1 > 0) movimientos.push({ producto_id: p.id, local_id: 1, tipo: 'entrada', cantidad: p.stock_l1, referencia: 'Importación Excel', usuario_id: p.usuario_id })
-                if (p.stock_l2 > 0) movimientos.push({ producto_id: p.id, local_id: 2, tipo: 'entrada', cantidad: p.stock_l2, referencia: 'Importación Excel', usuario_id: p.usuario_id })
+                if (p.stock_l1 > 0) movimientos.push({ producto_id: realId, local_id: 1, tipo: 'entrada', cantidad: p.stock_l1, referencia: 'Importación Excel', usuario_id: p.usuario_id })
+                if (p.stock_l2 > 0) movimientos.push({ producto_id: realId, local_id: 2, tipo: 'entrada', cantidad: p.stock_l2, referencia: 'Importación Excel', usuario_id: p.usuario_id })
                 if (movimientos.length > 0) {
                     await supabase.from('movimientos_stock').insert(movimientos)
                 }
+
+                // Actualizar SQLite con el id real de Supabase
+                await db.execute("DELETE FROM productos WHERE codigo = ? AND id != ?", [p.codigo, realId])
+                await db.execute(
+                    `INSERT OR REPLACE INTO productos
+                        (id, codigo, nombre, marca, modelo, precio_costo, precio_costo_usd,
+                         precio_venta, precio_promo, en_promo, categoria_id, proveedor_id,
+                         stock_l1, stock_l2, activo)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+                    [realId, p.codigo, p.nombre, p.marca || '', p.modelo || '',
+                     p.precio_costo || 0, p.precio_costo_usd || 0,
+                     p.precio_venta || 0, p.precio_promo || 0, p.en_promo ? 1 : 0,
+                     p.categoria_id, p.proveedor_id, p.stock_l1 || 0, p.stock_l2 || 0]
+                )
 
                 await db.execute("DELETE FROM productos_pendientes WHERE id = ?", [row.id])
                 console.log(`Producto pendiente ID ${row.id} (${p.nombre}) sincronizado.`)
@@ -1528,6 +1579,56 @@ await db.execute(`
             );
         `);
 
+        // --- MIGRACIÓN: limpiar duplicados locales de productos por codigo ---
+        try {
+            const dups = await db.select(`
+                SELECT codigo, COUNT(*) as cnt
+                FROM productos
+                WHERE codigo IS NOT NULL AND codigo != ''
+                GROUP BY codigo
+                HAVING COUNT(*) > 1
+            `);
+            if (dups.length > 0) {
+                for (const { codigo } of dups) {
+                    const rows = await db.select(
+                        "SELECT id, stock_l1, stock_l2 FROM productos WHERE codigo = ? ORDER BY id ASC",
+                        [codigo]
+                    );
+                    const [keep, ...remove] = rows;
+                    const removeIds = remove.map(r => r.id);
+
+                    await db.execute(
+                        "UPDATE productos SET stock_l1 = ?, stock_l2 = ? WHERE id = ?",
+                        [
+                            (keep.stock_l1 || 0) + remove.reduce((s, r) => s + (r.stock_l1 || 0), 0),
+                            (keep.stock_l2 || 0) + remove.reduce((s, r) => s + (r.stock_l2 || 0), 0),
+                            keep.id
+                        ]
+                    );
+
+                    for (const rid of removeIds) {
+                        await db.execute(
+                            "UPDATE OR IGNORE venta_items_local SET producto_id = ? WHERE producto_id = ?",
+                            [keep.id, rid]
+                        );
+                    }
+
+                    await db.execute(
+                        `DELETE FROM productos WHERE id IN (${removeIds.map(() => '?').join(',')})`,
+                        removeIds
+                    );
+                }
+            }
+        } catch (e) {
+            console.warn("Migración duplicados:", e.message);
+        }
+
+        try {
+            await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_productos_codigo_unique ON productos(codigo)");
+        } catch (e) {
+            console.warn("No se pudo crear índice único en productos.codigo:", e.message);
+        }
+
         // --- ÍNDICES PARA PERFORMANCE ---
         await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_codigo ON productos(codigo);");
         await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_nombre ON productos(nombre);");
@@ -1661,6 +1762,12 @@ export async function sincronizarTablasMaestras() {
                 const s1 = p.stock?.find(s => s.local_id === 1)?.cantidad || 0;
                 const s2 = p.stock?.find(s => s.local_id === 2)?.cantidad || 0;
                 
+                // Eliminar duplicados locales con mismo codigo pero distinto id
+                await db.execute(
+                    "DELETE FROM productos WHERE codigo = ? AND id != ?",
+                    [p.codigo, p.id]
+                );
+
                 await db.execute(
                     `INSERT OR REPLACE INTO productos (
                         id, codigo, nombre, precio_venta, precio_costo, 
@@ -1676,6 +1783,22 @@ export async function sincronizarTablasMaestras() {
                 );
             }
         }
+
+        // ─── LIMPIEZA: productos locales que ya no existen en la nube ───
+        if (prods && prods.length > 0) {
+            const codigosNube = new Set(prods.map(p => p.codigo?.toString().trim()).filter(Boolean))
+            const localesActivos = await db.select(
+                "SELECT id, codigo FROM productos WHERE activo = 1"
+            )
+            for (const loc of localesActivos) {
+                const cod = loc.codigo?.toString().trim()
+                if (cod && !codigosNube.has(cod)) {
+                    await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [loc.id])
+                    console.log(`🧹 Producto local ID ${loc.id} (cod:${cod}) marcado inactivo - no existe en nube`)
+                }
+            }
+        }
+
         console.log("✅ Sincronización maestra finalizada protegiendo datos locales.");
     } catch (error) {
         console.error("Error sincronizando maestros:", error);

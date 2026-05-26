@@ -68,53 +68,37 @@ async function upsertStock(prodId, l1, l2) {
 }
 
 async function main() {
-  let insertados = 0, actualizados = 0, errores = 0
+  let procesados = 0, errores = 0
 
   for (let i = 0; i < productos.length; i++) {
     const d = productos[i]
     const costoUsd = COTIZACION > 0 ? +(d.precio_costo / COTIZACION).toFixed(2) : 0
 
     try {
-      const { data: existente } = await supabase
-        .from('productos')
-        .select('id')
-        .eq('codigo', d.codigo)
-        .maybeSingle()
+      const { data: nuevo, error: errIns } = await supabase.from('productos').upsert({
+        codigo: d.codigo, nombre: d.nombre, marca: d.marca || null, modelo: d.modelo || null,
+        precio_costo: d.precio_costo, precio_costo_usd: costoUsd,
+        precio_venta: d.precio_venta, precio_promo: d.precio_promo, en_promo: d.en_promo, activo: true
+      }, { onConflict: 'codigo' }).select('id').single()
 
-      if (existente) {
-        await supabase.from('productos').update({
-          nombre: d.nombre, marca: d.marca || null, modelo: d.modelo || null,
-          precio_costo: d.precio_costo, precio_costo_usd: costoUsd,
-          precio_venta: d.precio_venta, precio_promo: d.precio_promo, en_promo: d.en_promo
-        }).eq('id', existente.id)
-        await upsertStock(existente.id, d.stock_l1, d.stock_l2)
-        actualizados++
-      } else {
-        const { data: nuevo, error: errIns } = await supabase.from('productos').insert({
-          codigo: d.codigo, nombre: d.nombre, marca: d.marca || null, modelo: d.modelo || null,
-          precio_costo: d.precio_costo, precio_costo_usd: costoUsd,
-          precio_venta: d.precio_venta, precio_promo: d.precio_promo, en_promo: d.en_promo, activo: true
-        }).select('id').single()
-        if (errIns || !nuevo) throw new Error(errIns?.message || 'sin respuesta')
+      if (errIns || !nuevo) throw new Error(errIns?.message || 'sin respuesta')
 
-        await upsertStock(nuevo.id, d.stock_l1, d.stock_l2)
+      await upsertStock(nuevo.id, d.stock_l1, d.stock_l2)
 
-        const movs = []
-        if (d.stock_l1 > 0) movs.push({ producto_id: nuevo.id, local_id: 1, tipo: 'entrada', cantidad: d.stock_l1, referencia: 'Carga inicial L1 (Excel)' })
-        if (d.stock_l2 > 0) movs.push({ producto_id: nuevo.id, local_id: 2, tipo: 'entrada', cantidad: d.stock_l2, referencia: 'Carga inicial L2 (Excel)' })
-        if (movs.length > 0) await supabase.from('movimientos_stock').insert(movs)
+      const movs = []
+      if (d.stock_l1 > 0) movs.push({ producto_id: nuevo.id, local_id: 1, tipo: 'entrada', cantidad: d.stock_l1, referencia: 'Carga inicial L1 (Excel)' })
+      if (d.stock_l2 > 0) movs.push({ producto_id: nuevo.id, local_id: 2, tipo: 'entrada', cantidad: d.stock_l2, referencia: 'Carga inicial L2 (Excel)' })
+      if (movs.length > 0) await supabase.from('movimientos_stock').insert(movs)
 
-        insertados++
-      }
-
-      process.stdout.write(`\r${i + 1}/${productos.length} · ${insertados} nuevos · ${actualizados} actualizados · ${errores} errores`)
+      procesados++
+      process.stdout.write(`\r${i + 1}/${productos.length} · ${procesados} procesados · ${errores} errores`)
     } catch (e) {
       errores++
       console.error(`\n❌ Código ${d.codigo} - ${d.nombre}: ${e.message}`)
     }
   }
 
-  console.log(`\n\n✅ Finalizado. ${insertados} insertados, ${actualizados} actualizados, ${errores} errores`)
+  console.log(`\n\n✅ Finalizado. ${procesados} procesados, ${errores} errores`)
 }
 
 main().catch(console.error)
