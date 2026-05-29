@@ -38,6 +38,24 @@ export default function Reparaciones() {
 
   useEffect(() => { cargar() }, [busqueda])
 
+  // Realtime: escuchar cambios en reparaciones (otras terminales)
+  useEffect(() => {
+    const channel = supabase
+      .channel('reparaciones-cambios')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'reparaciones' },
+        () => {
+          console.log('🔄 Cambio en reparaciones, recargando...');
+          cargar();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   const handleSort = (field) => {
     let direction = 'asc'
     if (sortConfig.field === field && sortConfig.direction === 'asc') direction = 'desc'

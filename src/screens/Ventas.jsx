@@ -77,7 +77,7 @@ function VentaModal({ title, onClose, children, width = 350, ui }) {
   )
 }
 
-export default function Ventas({ usuario }) {
+export default function Ventas({ usuario, config }) {
   const [busqueda, setBusqueda] = useState('')
   const isSubmitting = useRef(false);
   const [resultados, setResultados] = useState([])
@@ -108,29 +108,15 @@ const [filtroModelo, setFiltroModelo] = useState('')
 const cargarListasBase = async () => {
   try {
     const db = await Database.load("sqlite:cd_electronica.db");
-    
-    // 1. LEER CONFIGURACIÓN DEL LOCAL (Hardcodeo en base local)
-    let terminalLocalId = 1; // Valor por defecto por si algo falla
-    try {
-      const conf = await db.select("SELECT valor FROM configuracion WHERE clave = 'local_id'");
-      if (conf && conf.length > 0) {
-        terminalLocalId = Number(conf[0].valor);
-      }
-    } catch (errConfig) {
-      console.warn("No se pudo leer la tabla configuracion, usando Local 1 por defecto.", errConfig);
-    }
 
-    // Actualizamos el estado para que toda la pantalla de Ventas sepa en qué PC estamos
     setLocalConfig({
-      id: terminalLocalId,
-      nombre: terminalLocalId === 1 ? '📍 LOCAL 1 (Principal)' : '📍 LOCAL 2 (Sucursal)' 
+      id: config.local_id,
+      nombre: config.local_id === 1 ? '📍 LOCAL 1 (Principal)' : '📍 LOCAL 2 (Sucursal)'
     });
 
-    // 2. Categorías locales
     const cats = await db.select("SELECT * FROM categorias");
     setCategorias(cats || []);
 
-    // 3. Marcas locales únicas (buscamos en productos para no tener repetidas ni vacías)
     const prodsMarcas = await db.select("SELECT DISTINCT marca FROM productos WHERE marca IS NOT NULL AND marca != '' AND activo = 1 ORDER BY marca ASC");
     setMarcas(prodsMarcas.map(p => p.marca));
 
@@ -142,7 +128,32 @@ const cargarListasBase = async () => {
 
   useEffect(() => {
     cargarListasBase();
-    actualizarResumen(); 
+    actualizarResumen();
+  }, []);
+
+  // Realtime: escuchar cambios en ventas y productos (otras terminales)
+  useEffect(() => {
+    const channel = supabase
+      .channel('ventas-cambios')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'ventas' },
+        () => {
+          console.log('🔄 Cambio en ventas, actualizando resumen...');
+          actualizarResumen();
+        }
+      )
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'productos' },
+        () => {
+          console.log('🔄 Cambio en productos, recargando búsqueda...');
+          setResultados([]);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
 
@@ -164,9 +175,15 @@ const cargarListasBase = async () => {
 
         // Filtro por texto
         if (queryBusqueda) {
-          query += " AND (nombre LIKE ? OR marca LIKE ? OR modelo LIKE ?)";
-          const termino = `%${queryBusqueda}%`;
-          params.push(termino, termino, termino);
+          const palabras = queryBusqueda.split(/\s+/).filter(Boolean);
+          const condiciones = palabras.map(() =>
+            "(nombre LIKE ? OR marca LIKE ? OR modelo LIKE ?)"
+          );
+          query += " AND (" + condiciones.join(" AND ") + ")";
+          for (const pal of palabras) {
+            const termino = `%${pal}%`;
+            params.push(termino, termino, termino);
+          }
         }
 
         // Filtro por categoría
@@ -189,7 +206,7 @@ const cargarListasBase = async () => {
         const data = await db.select(query, params);
 
         // PROCESAMIENTO DE STOCK LOCAL
-        const localId = usuario.local_id || 1;
+        const localId = config.local_id || 1;
         const otroLocalId = localId === 1 ? 2 : 1;
 
         const conStock = data.map(p => {
@@ -223,11 +240,11 @@ const cargarListasBase = async () => {
 
     const t = setTimeout(cargar, 250);
     return () => clearTimeout(t);
-  }, [busqueda, filtroCategoria, filtroMarca, usuario.local_id]);
+  }, [busqueda, filtroCategoria, filtroMarca, config.local_id]);
 
   async function actualizarResumen() {
     try {
-      const res = await getResumenHoy(usuario.local_id);
+      const res = await getResumenHoy(config.local_id);
       setResumen(res);
     } catch (error) {
       console.error("Error al actualizar resumen:", error);
@@ -290,7 +307,7 @@ async function confirmarVentaFinal() {
       isSubmitting.current = true;
 
       const { id, error } = await registrarVenta({
-        localId: usuario.local_id, 
+        localId: config.local_id, 
         usuarioId: usuario.id, 
         items: carrito.map(item => ({
           producto_id: item.esManual ? null : item.producto_id,
@@ -307,12 +324,13 @@ async function confirmarVentaFinal() {
       if (error) throw new Error(error)
 
       // Limpieza y éxito
-      setTicketModal({ total: totalFinal }) 
+      setTicketModal({ total: totalFinal })
       setCarrito([])
       setShowConfirmModal(false)
       setMixtoData({ efectivo: '', tarjeta: '', transferencia: '' })
-      
-      actualizarResumen() 
+      setBusqueda('')
+
+      actualizarResumen()
       toast(`✅ Venta/Ajuste registrado correctamente`)
 
     } catch (err) { 
@@ -348,7 +366,7 @@ async function confirmarVentaFinal() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: 80 }}>
         <div>
           <h2 style={{ fontSize: 30, fontWeight: 900, margin: 0, color: UI.title }}>Nueva Venta</h2>
-          <span style={{ fontSize: 16, fontWeight: 600, color: UI.subtitle }}>📍 {usuario.local_nombre}</span>
+          <span style={{ fontSize: 16, fontWeight: 600, color: UI.subtitle }}>📍 {config.nombre_local}</span>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <VentaStatCard label="Ventas Hoy" value={resumen.cant} ui={UI} />
@@ -403,7 +421,8 @@ async function confirmarVentaFinal() {
             style={{ 
               display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: `1px solid ${UI.pageBorder}`,
               cursor: tieneStockLocal ? 'pointer' : 'not-allowed', 
-              background: p.en_promo ? UI.resultTagBg : '#fff',
+              background: tieneStockLocal ? (p.en_promo ? UI.resultTagBg : '#fff') : '#f1f5f9',
+              opacity: tieneStockLocal ? 1 : 0.45,
               transition: 'background 0.2s'
             }}
             onMouseEnter={e => tieneStockLocal && (e.currentTarget.style.backgroundColor = '#f1f5f9')}

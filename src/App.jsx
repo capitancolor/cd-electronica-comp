@@ -17,7 +17,7 @@ import { inicializarBaseLocal, sincronizarTablasMaestras, procesarVentasPendient
 const NAV = [
   { id: 'ventas',       label: 'Nueva Venta',  icon: 'computer', roles: ['admin', 'vendedor'] },
   { id: 'stock',        label: 'Stock',        icon: 'stock',    roles: ['admin', 'vendedor'] },
-  { id: 'reportes',     label: 'Ventas',       icon: 'reports',  roles: ['admin'] },
+  { id: 'reportes',     label: 'Ventas',       icon: 'reports',  roles: ['admin', 'vendedor'] },
   { id: 'amortizacion', label: 'Gastos',       icon: 'reports',  roles: ['admin'] },
   { id: 'reparaciones', label: 'Reparaciones', icon: 'stock',    roles: ['admin', 'vendedor'] },
   { id: 'clientes',     label: 'Clientes',     icon: 'stock',    roles: ['admin'] }, 
@@ -27,9 +27,11 @@ const NAV = [
 
 export default function App() {
   const [config, setConfig] = useState(null)
-  const [checking, setChecking] = useState(true) // Controla el splash inicial
+  const [checking, setChecking] = useState(true)
   const [usuario, setUsuario] = useState(null)
   const [seccion, setSeccion] = useState('ventas')
+  const [syncing, setSyncing] = useState(false)
+  const [lastSync, setLastSync] = useState(null)
   const { toasts } = useToast()
 
   // --- LÓGICA DE SINCRONIZACIÓN ORDENADA (PUSH -> PULL) ---
@@ -47,45 +49,39 @@ const ejecutarSincroCompleta = async () => {
     lastSyncRef.current = now;
 
     try {
+      setSyncing(true);
       console.log("🔄 Sincronización: Intentando subir ventas...");
       
-      // PASO 1: PUSH - Ventas offline
       await procesarVentasPendientes();
       console.log("⬆️ Ventas subidas correctamente.");
 
-      // PASO 2: PUSH - Productos importados offline
       await procesarProductosPendientes();
       console.log("⬆️ Productos importados sincronizados.");
 
-      // PASO 3: PULL - Traer datos actualizados de la nube
       await sincronizarTablasMaestras();
       console.log("⬇️ Stock actualizado desde la nube.");
 
+      setLastSync(new Date());
     } catch (error) {
-      // Capturamos el error de DNS o de Supabase aquí
       console.warn("⚠️ Sincro abortada para proteger el stock local:", error.message);
+    } finally {
+      setSyncing(false);
     }
   };
 
   // --- FLUJO DE INICIO ---
   useEffect(() => {
-    const prepararSistema = async () => {
+  const prepararSistema = async () => {
       try {
         setChecking(true);
         
-        // 1. Aseguramos que existan las tablas locales
         await inicializarBaseLocal();
 
-        // 2. Ejecutamos la sincronización inteligente inicial
-        await ejecutarSincroCompleta();
-
-        // 3. Seteamos configuración del local
-        // Nota: Ajustar según cómo recuperes la config real del local
-        setConfig({
-          local_id: 1,
-          nombre_local: 'LOCAL 1'
-        });
-
+        const savedConfig = await getLocalConfig();
+        if (savedConfig) {
+          await ejecutarSincroCompleta();
+          setConfig(savedConfig);
+        }
       } catch (error) {
         console.error("Error en el arranque de la app:", error);
       } finally {
@@ -95,10 +91,14 @@ const ejecutarSincroCompleta = async () => {
 
     prepararSistema();
 
-    // Listener para reconexión: Si el usuario está usando la app y vuelve el WiFi,
-    // disparamos el proceso automáticamente para subir lo pendiente y bajar stock nuevo.
     window.addEventListener('online', ejecutarSincroCompleta);
-    return () => window.removeEventListener('online', ejecutarSincroCompleta);
+
+    const interval = setInterval(ejecutarSincroCompleta, 60000);
+
+    return () => {
+      window.removeEventListener('online', ejecutarSincroCompleta);
+      clearInterval(interval);
+    };
   }, []);
 
   // 1. Pantalla de carga/Splash
@@ -180,6 +180,18 @@ const ejecutarSincroCompleta = async () => {
         </div>
 
         <div style={{ flex: 1 }} />
+
+        <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.05)', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+          <div style={{ fontSize: 9, color: '#16a34a', display: 'flex', alignItems: 'center', gap: 4, fontWeight: 700 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
+            CONECTADO
+          </div>
+          {lastSync && (
+            <div style={{ fontSize: 8, color: '#6b7280' }}>
+              {lastSync.toLocaleTimeString()}
+            </div>
+          )}
+        </div>
         
         <div style={{ padding: '12px 0', borderTop: '1px solid rgba(255,255,255,0.08)', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
           <div style={{ fontSize: 8, background: usuario.rol === 'admin' ? '#2563eb' : '#4b5563', color: 'white', padding: '1px 8px', borderRadius: 10, fontWeight: 800, textTransform: 'uppercase' }}>

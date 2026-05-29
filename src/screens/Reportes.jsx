@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { getVentas, getLocales, getCategorias, eliminarVenta } from '../services/negocio'
-import { Icon, Badge } from '../components/UI'
+import { supabase } from '../supabase'
+import { Icon, Badge, ConfirmDialog } from '../components/UI'
 import { exportarProductosExcel } from "../services/exportExcel"
 
 const fmt = v => '$' + Number(v).toLocaleString('es-AR', { maximumFractionDigits: 0 })
@@ -127,9 +128,9 @@ function SoftButton({ children, onClick, disabled = false, bg, text, border, sty
   )
 }
 
-export default function Reportes({ usuario }) {
+export default function Reportes({ usuario, config }) {
   const [locales, setLocales] = useState([])
-  const [filtroLocal, setFiltroLocal] = useState(usuario.rol !== 'admin' ? usuario.local_id : '')
+  const [filtroLocal, setFiltroLocal] = useState(usuario.rol !== 'admin' ? config.local_id : '')
   const [periodo, setPeriodo] = useState('hoy')
   const [ventas, setVentas] = useState([])
   const [loading, setLoading] = useState(false)
@@ -139,6 +140,8 @@ export default function Reportes({ usuario }) {
   const [categorias, setCategorias] = useState([])
   const [filtroCategoria, setFiltroCategoria] = useState('')
   const [ventaDetalleVisible, setVentaDetalleVisible] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const esVendedor = usuario.rol === 'vendedor';
   
   // CONFIGURACIÓN DE SORT IDÉNTICA A STOCK
   const [sortConfig, setSortConfig] = useState({ key: 'fecha', direction: 'desc' })
@@ -182,11 +185,41 @@ export default function Reportes({ usuario }) {
     finally { setLoading(false) }
   }, [filtroLocal, periodo, mesSeleccionado, añoSeleccionado]);
 
+  const handleDelete = async () => {
+    if (!confirmDelete) return;
+    const res = await eliminarVenta(confirmDelete.id);
+    setConfirmDelete(null);
+    if (res.ok) {
+      alert('Stock restaurado correctamente.');
+      generar();
+    } else {
+      alert('Error: ' + (res.msg || 'No se pudo anular la venta'));
+    }
+  };
+
   useEffect(() => {
     getLocales().then(setLocales)
     getCategorias().then(setCategorias)
     generar()
   }, [generar])
+
+  // Realtime: escuchar cambios en ventas (nuevas ventas de otros terminales)
+  useEffect(() => {
+    const channel = supabase
+      .channel('reportes-ventas')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'ventas' },
+        () => {
+          console.log('🔄 Cambio detectado en ventas, recargando...');
+          generar();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [generar]);
 
   // MANEJADOR DE SORT CLONADO DE STOCK
   const handleSort = (key) => {
@@ -308,12 +341,14 @@ export default function Reportes({ usuario }) {
   <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
     <tr style={{ background: UI.theadBg }}>
       <SortableTh label="FECHA" field="fecha" sortConfig={sortConfig} onSort={handleSort} />
-      <SortableTh label="PRODUCTO" field="productos_nombres" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="ARTÍCULO" field="productos_nombres" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="MARCA" field="productos_marcas" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="MODELO" field="productos_modelos" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="LOCAL" field="local_nombre" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="PAGO" field="metodo_pago" sortConfig={sortConfig} onSort={handleSort} />
-      <SortableTh label="COSTO" field="costo_total" sortConfig={sortConfig} onSort={handleSort} align="right" />
+      {!esVendedor && <SortableTh label="COSTO" field="costo_total" sortConfig={sortConfig} onSort={handleSort} align="right" />}
       <SortableTh label="PRECIO" field="total" sortConfig={sortConfig} onSort={handleSort} align="right" />
-      <SortableTh label="GANANCIA" field="total" sortConfig={sortConfig} onSort={handleSort} align="right" />
+      {!esVendedor && <SortableTh label="GANANCIA" field="total" sortConfig={sortConfig} onSort={handleSort} align="right" />}
       
       <th style={{ width: 50 }}></th>
     </tr>
@@ -321,7 +356,7 @@ export default function Reportes({ usuario }) {
   <tbody>
     {listaAMostrar.length === 0 ? (
       <tr>
-        <td colSpan="8" style={{ textAlign: 'center', padding: 60, color: UI.pageMuted, fontWeight: 600 }}>
+        <td colSpan={esVendedor ? 8 : 10} style={{ textAlign: 'center', padding: 60, color: UI.pageMuted, fontWeight: 600 }}>
           No hay registros.
         </td>
       </tr>
@@ -335,33 +370,28 @@ export default function Reportes({ usuario }) {
             <td style={{ padding: 14, color: UI.dateText, fontSize: 11, fontWeight: 600 }}>
               {new Date(v.fecha).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
             </td>
-            <td style={{ padding: 14, fontSize: 11, fontWeight: 700, maxWidth: 200 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <div style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: UI.priceText }} title={v.productos_nombres}>
-                  {v.productos_nombres || "Venta Directa"}
-                </div>
-                <button onClick={() => setVentaDetalleVisible(v)} style={{ background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 6, padding: '3px 5px', cursor: 'pointer', display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-                  <Icon name="stock" size={10} color="#4b5563" />
-                </button>
-              </div>
-            </td>
-            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.local_nombre}</td>
-            <td style={{ padding: 14 }}><Badge color={METODO_COLOR[v.metodo_pago] || UI.pageMuted}>{v.metodo_pago.toUpperCase()}</Badge></td>
-            <td style={{ padding: 14, textAlign: 'right', color: UI.pageMuted, fontSize: 11 }}>{fmt(costo)}</td>
-            <td style={{ padding: 14, textAlign: 'right', fontWeight: 800, color: UI.priceText }}>{fmt(precio)}</td>
-            <td style={{ padding: 14, textAlign: 'right', color: ganancia >= 0 ? UI.profitPositive : UI.profitNegative, fontWeight: 800 }}>{fmt(ganancia)}</td>
+        <td style={{ padding: 14, fontSize: 11, fontWeight: 700, maxWidth: 200 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: UI.priceText }} title={v.productos_nombres}>
+              {v.productos_nombres || "Venta Directa"}
+            </div>
+            <button onClick={() => setVentaDetalleVisible(v)} style={{ background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 6, padding: '3px 5px', cursor: 'pointer', display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+              <Icon name="stock" size={10} color="#4b5563" />
+            </button>
+          </div>
+        </td>
+        <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.productos_marcas || '-'}</td>
+        <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.productos_modelos || '-'}</td>
+        <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.local_nombre}</td>
+        <td style={{ padding: 14 }}><Badge color={METODO_COLOR[v.metodo_pago] || UI.pageMuted}>{v.metodo_pago.toUpperCase()}</Badge></td>
+        {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: UI.pageMuted, fontSize: 11 }}>{fmt(costo)}</td>}
+        <td style={{ padding: 14, textAlign: 'right', fontWeight: 800, color: UI.priceText }}>{fmt(precio)}</td>
+        {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: ganancia >= 0 ? UI.profitPositive : UI.profitNegative, fontWeight: 800 }}>{fmt(ganancia)}</td>}
             <td style={{ padding: '0 10px', textAlign: 'center' }}>
-              <button 
-                onClick={async (e) => {
+                <button 
+                onClick={(e) => {
                   e.stopPropagation();
-                  if (window.confirm('¿ELIMINAR MOVIMIENTO?')) {
-                    const res = await eliminarVenta(v.id);
-                    if (res.ok) {
-                      generar(); // Al recargar los datos, la fila desaparece visualmente
-                    } else {
-                      alert('Error: ' + res.msg); // Usamos el alert nativo del navegador
-                    }
-                  }
+                  setConfirmDelete(v);
                 }}
                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
@@ -456,6 +486,17 @@ export default function Reportes({ usuario }) {
       </button>
     </div>
   </div>
+)}
+
+{confirmDelete && (
+  <ConfirmDialog
+    title="Eliminar venta"
+    message={`¿Seguro que querés borrar esta venta?\n\nSe va a restaurar el stock de los productos.`}
+    onConfirm={handleDelete}
+    onClose={() => setConfirmDelete(null)}
+    confirmLabel="Eliminar"
+    danger
+  />
 )}
     </div>
   )

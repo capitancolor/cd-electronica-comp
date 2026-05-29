@@ -14,7 +14,7 @@ export default defineConfig({
   },
   // 2. Evitamos que Vite intente pre-optimizar las APIs de Tauri
   optimizeDeps: {
-    exclude: ['@electric-sql/pglite', '@tauri-apps/api'],
+    exclude: ['@electric-sql/pglite', '@tauri-apps/api', '@tauri-apps/plugin-fs', '@tauri-apps/plugin-sql', '@tauri-apps/plugin-dialog'],
   },
   // 3. Importante: Tauri v1 necesita que el build sea compatible
   build: {

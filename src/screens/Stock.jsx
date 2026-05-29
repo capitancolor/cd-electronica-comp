@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Database from '@tauri-apps/plugin-sql'
-import { eliminarProducto, getProveedores, importarProductosDesdeExcel } from '../services/negocio'
+import { eliminarProducto, getProveedores, importarProductosDesdeExcel, getStock } from '../services/negocio'
+import { supabase } from '../supabase'
 import { Icon, toast } from '../components/UI'
 import StockModales from './StockModales'
 import ErrorBoundary from '../components/ErrorBoundary'
@@ -65,13 +66,13 @@ function ActionIconButton({ color, title, onClick, children }) {
   )
 }
 
-export default function Stock({ usuario }) {
+export default function Stock({ usuario, config }) {
   const [stock, setStock] = useState([])
   const [locales, setLocales] = useState([])
   const [categorias, setCategorias] = useState([])
   const [proveedores, setProveedores] = useState([])
   const esAdmin = usuario.rol === 'admin';
-  const [filtroLocal, setFiltroLocal] = useState(usuario.rol !== 'admin' ? String(usuario.local_id) : '')
+  const [filtroLocal, setFiltroLocal] = useState(usuario.rol !== 'admin' ? String(config.local_id) : '')
   const [filtroCategoria, setFiltroCategoria] = useState('')
   const [filtroProveedor, setFiltroProveedor] = useState('')
   const [filtroMarca, setFiltroMarca] = useState('')
@@ -169,6 +170,34 @@ const getDb = async () => {
     if (ready) cargarStock();
   }, [ready, cargarStock]);
 
+  // Realtime: escuchar cambios en stock/productos (otras terminales)
+  useEffect(() => {
+    if (!ready) return;
+    const channel = supabase
+      .channel('stock-cambios')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'stock' },
+        async () => {
+          console.log('🔄 Cambio en stock, sincronizando...');
+          await getStock({});
+          cargarStock();
+        }
+      )
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'productos' },
+        async () => {
+          console.log('🔄 Cambio en productos, sincronizando...');
+          await getStock({});
+          cargarStock();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [ready, cargarStock]);
+
   useEffect(() => {
     setPagina(1)
   }, [filtroBusqueda, filtroCategoria, filtroProveedor, filtroMarca, filtroLocal])
@@ -257,8 +286,13 @@ const fetchDolar = async () => {
     }
   }).filter(p => {
     if (filtroBusqueda) {
-      const t = filtroBusqueda.toLowerCase()
-      if (!(p.nombre?.toLowerCase().includes(t) || p.marca?.toLowerCase().includes(t) || p.modelo?.toLowerCase().includes(t))) return false
+      const palabras = filtroBusqueda.toLowerCase().split(/\s+/).filter(Boolean)
+      const cumple = palabras.every(pal =>
+        p.nombre?.toLowerCase().includes(pal) ||
+        p.marca?.toLowerCase().includes(pal) ||
+        p.modelo?.toLowerCase().includes(pal)
+      )
+      if (!cumple) return false
     }
     if (filtroCategoria && String(p.categoria_id) !== String(filtroCategoria)) return false
     if (filtroProveedor && String(p.proveedor_id) !== String(filtroProveedor)) return false

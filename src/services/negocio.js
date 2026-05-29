@@ -513,22 +513,10 @@ export async function getStockCantidad(productoId, localId) {
  * VENTAS
  */
 export async function registrarVenta({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto }) {
+  const detalleConOrigen = metodoPago === 'mixto' ? { ...(detalleMixto || {}), local_original: localId } : null;
   const db = await Database.load("sqlite:cd_electronica.db");
 
-  const guardarVentaOffline = async () => {
-    const fecha = new Date().toISOString();
-    
-    // Guardamos la venta completa como un JSON en una tabla de pendientes para no perder la estructura mixta
-    const ventaPendiente = { 
-      localId, usuarioId, items, metodoPago, totalFinal, detalleMixto, fecha 
-    };
-
-    await db.execute(
-      "INSERT INTO ventas_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify(ventaPendiente), fecha]
-    );
-
-    // IMPORTANTE: Descontar stock en el SQLite local para que el vendedor vea el stock real al instante
+  const descontarStockLocal = async () => {
     for (const item of items) {
       if (item.producto_id && !item.es_manual) {
         const columnaStock = localId === 1 ? 'stock_l1' : 'stock_l2';
@@ -538,44 +526,46 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
         );
       }
     }
-
-    return { id: 'OFFLINE_OK', offline: true };
   };
 
-  // Verificación de conexión
-  if (!window.navigator.onLine) return await guardarVentaOffline();
+  // Offline: guardar pendiente + descontar stock local
+  if (!window.navigator.onLine) {
+    const fecha = new Date().toISOString();
+    await db.execute(
+      "INSERT INTO ventas_pendientes (payload, fecha) VALUES (?, ?)",
+      [JSON.stringify({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto, fecha }), fecha]
+    );
+    await descontarStockLocal();
+    return { id: 'OFFLINE_OK', offline: true };
+  }
 
   try {
     let ventasParaRegistrar = [];
     
-    // MANTENEMOS TU LÓGICA DE NEGOCIO ORIGINAL PARA VENTAS MIXTAS/TARJETA EN L2
     if (localId === 2 && (metodoPago === 'mixto' || metodoPago === 'tarjeta')) {
       if (metodoPago === 'mixto') {
         const montoT = parseFloat(detalleMixto?.tarjeta || 0);
         if (montoT > 0) ventasParaRegistrar.push({ local: 1, total: montoT, metodo: 'tarjeta' });
         if (totalFinal - montoT > 0) ventasParaRegistrar.push({ local: 2, total: totalFinal - montoT, metodo: 'mixto' });
       } else {
-        // Si es tarjeta pura en L2, se registra en L1 por tu flujo administrativo
         ventasParaRegistrar.push({ local: 1, total: totalFinal, metodo: 'tarjeta' });
       }
     } else {
       ventasParaRegistrar.push({ local: localId, total: totalFinal, metodo: metodoPago });
     }
 
-    // REGISTRO EN SUPABASE
     for (const v of ventasParaRegistrar) {
       const { data: venta, error: errorVenta } = await supabase.from('ventas').insert([{
         local_id: v.local, 
         usuario_id: usuarioId, 
         total: v.total, 
         metodo_pago: v.metodo,
-        detalle_mixto: metodoPago === 'mixto' ? detalleMixto : null, 
+        detalle_mixto: detalleConOrigen, 
         fecha: new Date().toISOString()
       }]).select().single();
 
       if (errorVenta) throw errorVenta;
 
-      // Solo insertamos los items para la primera parte del split (evitar duplicar items en tablas de reporte)
       if (ventasParaRegistrar.indexOf(v) === 0) {
         const detalleInsert = items.map(item => ({
           venta_id: venta.id, 
@@ -589,7 +579,6 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
       }
     }
 
-    // ACTUALIZACIÓN DE STOCK Y MOVIMIENTOS EN LA NUBE
     for (const item of items) {
       if (item.producto_id && !item.es_manual) {
         const actual = await getStockCantidad(item.producto_id, localId);
@@ -606,7 +595,6 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
           usuario_id: usuarioId
         });
 
-        // Sincronizamos el SQLite local para que esté al día
         const columnaStock = localId === 1 ? 'stock_l1' : 'stock_l2';
         await db.execute(
           `UPDATE productos SET ${columnaStock} = ? WHERE id = ?`,
@@ -617,7 +605,10 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
     
     return { id: 'OK' };
   } catch (error) {
-    if (checkOfflineError(error)) return await guardarVentaOffline();
+    if (checkOfflineError(error)) {
+      await descontarStockLocal();
+      return { id: 'OFFLINE_OK', offline: true };
+    }
     throw error;
   }
 }
@@ -628,13 +619,13 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
     try {
         // --- 1. INTENTO NUBE ---
         let query = supabase.from('ventas')
-            .select('*, locales(nombre), usuarios(nombre), venta_items(*, productos(nombre, precio_costo, categoria_id, categorias(nombre)))')
+            .select('*, locales(nombre), usuarios(nombre), venta_items(*, productos(nombre, marca, modelo, precio_costo, categoria_id, categorias(nombre)))')
             .order('fecha', { ascending: false })
             .limit(limit);
 
         if (localId) query = query.eq('local_id', localId);
-        if (fechaDesde) query = query.gte('fecha', `${fechaDesde}T00:00:00`);
-        if (fechaHasta) query = query.lte('fecha', `${fechaHasta}T23:59:59`);
+        if (fechaDesde) query = query.gte('fecha', new Date(`${fechaDesde}T00:00:00`).toISOString());
+        if (fechaHasta) query = query.lte('fecha', new Date(`${fechaHasta}T23:59:59`).toISOString());
 
         const { data, error } = await query;
         if (error) throw error;
@@ -644,6 +635,8 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             local_nombre: v.locales?.nombre || 'S/D',
             vendedor: v.usuarios?.nombre || 'Sistema',
             productos_nombres: v.venta_items?.map(i => i.productos?.nombre || i.descripcion).join(', '),
+            productos_marcas: [...new Set(v.venta_items?.map(i => i.productos?.marca).filter(Boolean))].join(', '),
+            productos_modelos: [...new Set(v.venta_items?.map(i => i.productos?.modelo).filter(Boolean))].join(', '),
             categorias_nombres: [...new Set(v.venta_items?.map(i => i.productos?.categorias?.nombre).filter(Boolean))].join(', ') || 'Sin categoría',
             costo_total: v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
             venta_items: v.venta_items?.map(item => ({
@@ -655,9 +648,9 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
         // --- 2. SINCRONIZACIÓN AL ESPEJO LOCAL ---
         for (const v of formattedData) {
             await db.execute(
-                `INSERT OR REPLACE INTO ventas (id, fecha, total, metodo_pago, local_id, local_nombre, vendedor, productos_nombres, costo_total) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [v.id, v.fecha, v.total, v.metodo_pago, v.local_id, v.local_nombre, v.vendedor, v.productos_nombres, v.costo_total]
+                `INSERT OR REPLACE INTO ventas (id, fecha, total, metodo_pago, local_id, local_nombre, vendedor, productos_nombres, productos_marcas, productos_modelos, costo_total) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [v.id, v.fecha, v.total, v.metodo_pago, v.local_id, v.local_nombre, v.vendedor, v.productos_nombres, v.productos_marcas, v.productos_modelos, v.costo_total]
             );
             
             if (v.venta_items) {
@@ -681,8 +674,8 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             let params = [];
 
             if (localId) { sql += " AND local_id = ?"; params.push(localId); }
-            if (fechaDesde) { sql += " AND fecha >= ?"; params.push(`${fechaDesde}T00:00:00`); }
-            if (fechaHasta) { sql += " AND fecha <= ?"; params.push(`${fechaHasta}T23:59:59`); }
+            if (fechaDesde) { sql += " AND fecha >= ?"; params.push(new Date(`${fechaDesde}T00:00:00`).toISOString()); }
+            if (fechaHasta) { sql += " AND fecha <= ?"; params.push(new Date(`${fechaHasta}T23:59:59`).toISOString()); }
             
             const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
 
@@ -740,27 +733,71 @@ export async function getVentaDetalle(ventaId) {
 export async function eliminarVenta(id) {
     const db = await Database.load("sqlite:cd_electronica.db");
 
-    // Si es una venta pendiente (ID temporal)
     if (String(id).startsWith('PEND-')) {
         const realId = id.replace('PEND-', '');
         await db.execute("DELETE FROM ventas_pendientes WHERE id = ?", [realId]);
         return { ok: true };
     }
 
-    // Si es una venta real, requiere internet para impactar en Supabase
     if (!window.navigator.onLine) {
         return { ok: false, msg: "No podés eliminar ventas registradas sin conexión." };
     }
 
     try {
-        // 1. Borrar de Supabase (La cascada borrará los items si está configurada)
+        const { data: venta, error: errV } = await supabase.from('ventas')
+            .select('*, venta_items(producto_id, cantidad)')
+            .eq('id', id)
+            .maybeSingle();
+        if (errV) throw errV;
+        if (!venta) return { ok: false, msg: 'Venta no encontrada' };
+
+        let localRestore = venta.local_id;
+        const dm = venta.detalle_mixto;
+        if (dm && typeof dm === 'object' && dm.local_original) {
+            localRestore = dm.local_original;
+        } else if (dm && typeof dm === 'object' && venta.metodo_pago === 'tarjeta') {
+            const { data: hermanas } = await supabase.from('ventas')
+                .select('local_id')
+                .eq('fecha', venta.fecha)
+                .neq('id', id)
+                .limit(1);
+            if (hermanas && hermanas.length > 0) localRestore = hermanas[0].local_id;
+        }
+
+        const items = venta.venta_items || [];
+        for (const it of items) {
+            if (!it.producto_id || !it.cantidad) continue;
+
+            const { data: stockActual } = await supabase.from('stock')
+                .select('cantidad')
+                .eq('producto_id', it.producto_id)
+                .eq('local_id', localRestore)
+                .maybeSingle();
+
+            const nuevaCant = (stockActual?.cantidad || 0) + it.cantidad;
+
+            if (stockActual) {
+                await supabase.from('stock').update({ cantidad: nuevaCant })
+                    .eq('producto_id', it.producto_id)
+                    .eq('local_id', localRestore);
+            } else {
+                await supabase.from('stock').insert({ producto_id: it.producto_id, local_id: localRestore, cantidad: nuevaCant });
+            }
+
+            const columna = localRestore === 1 ? 'stock_l1' : 'stock_l2';
+            await db.execute(
+                `UPDATE productos SET ${columna} = ${columna} + ? WHERE id = ?`,
+                [it.cantidad, it.producto_id]
+            );
+        }
+
         const { error } = await supabase.from('ventas').delete().eq('id', id);
         if (error) throw error;
 
-        // 2. Borrar del espejo local
         await db.execute("DELETE FROM ventas WHERE id = ?", [id]);
-        
-        return { ok: true };
+        await db.execute("DELETE FROM venta_items_local WHERE venta_id = ?", [id]);
+
+        return { ok: true, msg: 'Venta eliminada y stock restaurado' };
     } catch (error) {
         console.error("Error eliminando venta:", error);
         return { ok: false, msg: error.message };
@@ -1529,6 +1566,9 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
         costo_total REAL
     );
 `);
+        // Migración: agregar columnas nuevas si no existen
+        try { await db.execute("ALTER TABLE ventas ADD COLUMN productos_marcas TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE ventas ADD COLUMN productos_modelos TEXT"); } catch (_) {}
 
 await db.execute(`
     CREATE TABLE IF NOT EXISTS venta_items_local (
@@ -1827,11 +1867,9 @@ export async function procesarVentasPendientes() {
             try {
                 const v = JSON.parse(row.payload);
                 
-                // registrarVenta ya tiene la lógica de split para L2 y carga de items
                 const res = await registrarVenta(v);
-                
-                if (res.id === 'OK' || res.id === 'OFFLINE_OK') {
-                    // Si se registró bien en la nube, la borramos del local
+
+                if (res.id === 'OK') {
                     await db.execute("DELETE FROM ventas_pendientes WHERE id = ?", [row.id]);
                     console.log(`Venta pendiente ID ${row.id} sincronizada y eliminada del local.`);
                 }
