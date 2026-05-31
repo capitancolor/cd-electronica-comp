@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { getClientes, guardarCliente, eliminarCliente } from '../services/negocio'
-import { Icon, toast } from '../components/UI'
+import { Icon, toast, ConfirmDialog } from '../components/UI'
 
 const UI = {
   headerBg: '#1f2937', 
@@ -22,6 +22,7 @@ export default function Clientes() {
   const [busqueda, setBusqueda] = useState('')
   const [loading, setLoading] = useState(false)
   const [modal, setModal] = useState({ show: false, data: null })
+  const [eliminarId, setEliminarId] = useState(null)
 
   // --- ESTADO DE ORDENAMIENTO ---
   const [sortConfig, setSortConfig] = useState({ field: 'nombre', direction: 'asc' })
@@ -91,14 +92,14 @@ export default function Clientes() {
     }
   }
 
-  const handleEliminar = async (id) => {
-    if (window.confirm('¿Eliminar este cliente?')) {
-      try {
-        await eliminarCliente(id)
-        cargar()
-        toast("Eliminado")
-      } catch (err) { toast("Error al eliminar", "error") }
-    }
+  const handleEliminar = async () => {
+    if (!eliminarId) return
+    try {
+      await eliminarCliente(eliminarId)
+      setEliminarId(null)
+      cargar()
+      toast("Cliente eliminado")
+    } catch (err) { toast("Error al eliminar", "error") }
   }
 
   // Componente de cabecera con Sort
@@ -171,7 +172,7 @@ export default function Clientes() {
                   <td style={{ ...styles.td, textAlign: 'center' }}>
                     <div style={{ display: 'flex', justifyContent: 'center', gap: 5 }}>
                       <button onClick={() => abrirModal(c)} style={styles.btnAction} title="Editar"><Icon name="tune" color={UI.accent} size={18} /></button>
-                      <button onClick={() => handleEliminar(c.id)} style={styles.btnAction} title="Eliminar"><Icon name="trash" color="#ef4444" size={18} /></button>
+                      <button onClick={() => setEliminarId(c.id)} style={styles.btnAction} title="Eliminar"><Icon name="trash" color="#ef4444" size={18} /></button>
                     </div>
                   </td>
                 </tr>
@@ -263,6 +264,17 @@ export default function Clientes() {
             </div>
           </div>
         </div>
+      )}
+
+      {eliminarId && (
+        <ConfirmDialog
+          title="Eliminar Cliente"
+          message="¿Estás seguro de eliminar este cliente? Esta acción no se puede deshacer."
+          confirmLabel="Eliminar"
+          danger
+          onConfirm={handleEliminar}
+          onClose={() => setEliminarId(null)}
+        />
       )}
     </div>
   )

@@ -487,6 +487,31 @@ export async function importarProductosDesdeExcel(data, usuario_id) {
     importados++
   }
 
+  // ── Limpiar productos que NO están en el Excel ──
+  const codigosEnExcel = new Set()
+  for (const row of data) {
+    const nombre = normalizar(row, ['Producto', 'producto', 'NOMBRE', 'nombre', 'PRODUCTO'])
+    if (!nombre) continue
+    const codigo = String(normalizar(row, ['Codigo', 'codigo', 'CÓDIGO', 'CODIGO', 'Código']) || '').trim()
+    if (codigo) codigosEnExcel.add(codigo)
+  }
+
+  if (codigosEnExcel.size > 0) {
+    const aBorrar = await db.select(
+      "SELECT id, codigo FROM productos WHERE activo = 1 AND codigo IS NOT NULL AND codigo != ''"
+    )
+    for (const prod of aBorrar) {
+      if (!codigosEnExcel.has(prod.codigo.toString().trim())) {
+        await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [prod.id])
+        try {
+          await supabase.from('productos').update({ activo: false }).eq('id', prod.id)
+        } catch (e) {
+          console.warn("Supabase no disponible al limpiar:", e.message)
+        }
+      }
+    }
+  }
+
   return importados
 }
 
@@ -513,8 +538,9 @@ export async function getStockCantidad(productoId, localId) {
  * VENTAS
  */
 export async function registrarVenta({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto }) {
-  const detalleConOrigen = metodoPago === 'mixto' ? { ...(detalleMixto || {}), local_original: localId } : null;
   const db = await Database.load("sqlite:cd_electronica.db");
+  const costoTotalItems = items.reduce((sum, it) => sum + (it.cantidad || 0) * (it.precio_costo || 0), 0);
+  const detalleConOrigen = metodoPago === 'mixto' ? { ...(detalleMixto || {}), local_original: localId, costo_total: costoTotalItems } : null;
 
   const descontarStockLocal = async () => {
     for (const item of items) {
@@ -555,12 +581,15 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
     }
 
     for (const v of ventasParaRegistrar) {
+      const proporcion = totalFinal > 0 ? v.total / totalFinal : 1 / ventasParaRegistrar.length;
+      const detalleConCosto = detalleConOrigen ? { ...detalleConOrigen, costo_proporcional: Math.round(costoTotalItems * proporcion) } : null;
+
       const { data: venta, error: errorVenta } = await supabase.from('ventas').insert([{
         local_id: v.local, 
         usuario_id: usuarioId, 
         total: v.total, 
         metodo_pago: v.metodo,
-        detalle_mixto: detalleConOrigen, 
+        detalle_mixto: detalleConCosto, 
         fecha: new Date().toISOString()
       }]).select().single();
 
@@ -576,6 +605,16 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
           subtotal: item.cantidad * item.precio_unitario
         }));
         await supabase.from('venta_items').insert(detalleInsert);
+      } else {
+        const nombresProductos = items.map(i => i.nombre || i.descripcion).filter(Boolean).join(', ');
+        await supabase.from('venta_items').insert([{
+          venta_id: venta.id,
+          producto_id: null,
+          descripcion: `Pago mixto - resto en efectivo Local 2: ${nombresProductos}`,
+          cantidad: 1,
+          precio_unitario: v.total,
+          subtotal: v.total
+        }]);
       }
     }
 
@@ -638,7 +677,7 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             productos_marcas: [...new Set(v.venta_items?.map(i => i.productos?.marca).filter(Boolean))].join(', '),
             productos_modelos: [...new Set(v.venta_items?.map(i => i.productos?.modelo).filter(Boolean))].join(', '),
             categorias_nombres: [...new Set(v.venta_items?.map(i => i.productos?.categorias?.nombre).filter(Boolean))].join(', ') || 'Sin categoría',
-            costo_total: v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
+            costo_total: v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
             venta_items: v.venta_items?.map(item => ({
                 ...item,
                 categoria_nombre: item.productos?.categorias?.nombre || 'Sin categoría'
@@ -813,11 +852,21 @@ export async function getGastos(desde, hasta) {
     if (error) throw error;
     if (data) {
       const db = await Database.load("sqlite:cd_electronica.db");
+      // Respaldar dias_aplicados locales antes de que el sync los pise
+      const locales = await db.select("SELECT id, dias_aplicados FROM gastos WHERE dias_aplicados IS NOT NULL");
+      const mapa = {};
+      for (const l of locales) mapa[l.id] = l.dias_aplicados;
+      // Sync desde Supabase
       for (const g of data) {
         await db.execute(
           "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
           [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id]
         );
+        // Restaurar dias_aplicados si existían localmente
+        if (mapa[g.id]) {
+          await db.execute("UPDATE gastos SET dias_aplicados = ? WHERE id = ?", [mapa[g.id], g.id]);
+          g.dias_aplicados = JSON.parse(mapa[g.id]);
+        }
       }
     }
     return data || [];
@@ -829,7 +878,11 @@ export async function getGastos(desde, hasta) {
       if (desde) { sql += " AND fecha >= ?"; params.push(desde); }
       if (hasta) { sql += " AND fecha <= ?"; params.push(hasta); }
       sql += " ORDER BY fecha DESC";
-      return await db.select(sql, params);
+      const localData = await db.select(sql, params);
+      for (const g of localData) {
+        if (g.dias_aplicados) g.dias_aplicados = JSON.parse(g.dias_aplicados);
+      }
+      return localData;
     }
     throw error;
   }
@@ -846,11 +899,12 @@ export async function registrarGasto(gasto) {
     usuario_id: gasto.usuario_id ? parseInt(gasto.usuario_id) : null, 
     sincronizado: 1 
   };
+  const diasAplicados = gasto.dias_aplicados?.length > 0 ? JSON.stringify(gasto.dias_aplicados) : null;
 
   const guardarGastoOffline = async () => {
     await db.execute(
       "INSERT INTO gastos_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify(payload), new Date().toISOString()]
+      [JSON.stringify({ ...payload, dias_aplicados: gasto.dias_aplicados }), new Date().toISOString()]
     );
     return { offline: true };
   };
@@ -860,7 +914,12 @@ export async function registrarGasto(gasto) {
   try {
     const { data, error } = await supabase.from('gastos').insert([payload]).select().single();
     if (error) throw error;
-    return data;
+    const g = data;
+    await db.execute(
+      "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados]
+    );
+    return { ...g, dias_aplicados: gasto.dias_aplicados };
   } catch (error) {
     if (checkOfflineError(error)) return await guardarGastoOffline();
     throw error;
@@ -876,12 +935,13 @@ export async function actualizarGasto(id, cambios) {
     local_id: cambios.local_id ? parseInt(cambios.local_id) : null,
     usuario_id: cambios.usuario_id ? parseInt(cambios.usuario_id) : null
   };
+  const diasAplicados = cambios.dias_aplicados?.length > 0 ? JSON.stringify(cambios.dias_aplicados) : null;
   const { error } = await supabase.from('gastos').update(payload).eq('id', id);
   if (error) throw error;
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute(
-    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ? WHERE id = ?",
-    [payload.fecha, payload.descripcion, payload.monto, payload.categoria, payload.local_id, payload.usuario_id, id]
+    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, dias_aplicados = ? WHERE id = ?",
+    [payload.fecha, payload.descripcion, payload.monto, payload.categoria, payload.local_id, payload.usuario_id, diasAplicados, id]
   );
 }
 
@@ -1607,6 +1667,13 @@ await db.execute(`
                 sincronizado INTEGER DEFAULT 0
             );
         `);
+
+        // --- MIGRACIÓN: agregar columna dias_aplicados a gastos ---
+        try {
+            await db.execute("ALTER TABLE gastos ADD COLUMN dias_aplicados TEXT");
+        } catch (e) {
+            // ya existe, ignorar
+        }
 
         // --- TABLA NOTAS ---
         await db.execute(`

@@ -206,7 +206,7 @@ const ejecutarSincroCompleta = async () => {
       </nav>
 
       <main className="main-content">
-        <Screen usuario={usuario} config={config} />
+        <Screen usuario={usuario} config={config} onConfigChange={setConfig} />
       </main>
 
       <ToastContainer toasts={toasts} />

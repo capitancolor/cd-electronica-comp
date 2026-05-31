@@ -4,6 +4,12 @@ import { supabase } from '../supabase' // Lo dejamos por si getResumenHoy lo nec
 import { registrarVenta, getVentaDetalle, getResumenHoy } from '../services/negocio' // Quitamos getProductos y getStockCantidad
 import { exportarVentaPDF } from '../services/exportPdf'
 import { Icon, toast } from '../components/UI'
+import { saveLocalConfig } from '../services/config'
+
+const stylesLocalBtn = {
+  display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '14px 16px',
+  borderRadius: 10, border: '2px solid #ccc', cursor: 'pointer', fontSize: 14, textAlign: 'left'
+}
 
 const fmt = v => '$' + Number(v).toLocaleString('es-AR', { maximumFractionDigits: 0 })
 
@@ -77,7 +83,7 @@ function VentaModal({ title, onClose, children, width = 350, ui }) {
   )
 }
 
-export default function Ventas({ usuario, config }) {
+export default function Ventas({ usuario, config, onConfigChange }) {
   const [busqueda, setBusqueda] = useState('')
   const isSubmitting = useRef(false);
   const [resultados, setResultados] = useState([])
@@ -92,9 +98,11 @@ export default function Ventas({ usuario, config }) {
 const [filtroMarca, setFiltroMarca] = useState('')
 const [filtroModelo, setFiltroModelo] = useState('')
   
+  const [loading, setLoading] = useState(false)
   const [showManualModal, setShowManualModal] = useState(false)
   const [showConfirmModal, setShowConfirmModal] = useState(false)
   const [ticketModal, setTicketModal] = useState(null)
+  const [showLocalModal, setShowLocalModal] = useState(false)
   const [localConfig, setLocalConfig] = useState({ id: null, nombre: 'Cargando local...' });
   const [manualData, setManualData] = useState({ concepto: '', precio: '' })
   const [mixtoData, setMixtoData] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
@@ -130,6 +138,13 @@ const cargarListasBase = async () => {
     cargarListasBase();
     actualizarResumen();
   }, []);
+
+  useEffect(() => {
+    setLocalConfig({
+      id: config.local_id,
+      nombre: config.local_id === 1 ? '📍 LOCAL 1 (Principal)' : '📍 LOCAL 2 (Sucursal)'
+    });
+  }, [config.local_id]);
 
   // Realtime: escuchar cambios en ventas y productos (otras terminales)
   useEffect(() => {
@@ -290,22 +305,21 @@ const cargarListasBase = async () => {
       precio_unitario: precioFinal, 
       cantidad: 1,
       esManual: prod.esManual || false,
-      stockDisponible: prod.stockActual
+      stockDisponible: prod.stockActual,
+      precio_costo: parseFloat(prod.precio_costo) || 0
     }];
   });
   setBusqueda('');
 }
 
 async function confirmarVentaFinal() {
-    // Bloqueo de seguridad: si ya se está enviando, no hace nada
-    if (isSubmitting.current) return;
+    if (isSubmitting.current) return
+    if (carrito.length === 0) return toast('Carrito vacío', 'error')
+
+    isSubmitting.current = true
+    setLoading(true)
 
     try {
-      if (carrito.length === 0) return toast('Carrito vacío', 'error')
-      
-      // Activamos el bloqueo
-      isSubmitting.current = true;
-
       const { id, error } = await registrarVenta({
         localId: config.local_id, 
         usuarioId: usuario.id, 
@@ -314,7 +328,8 @@ async function confirmarVentaFinal() {
           nombre: item.nombre, 
           precio_unitario: item.precio_unitario, 
           cantidad: item.cantidad,
-          es_manual: item.esManual || false
+          es_manual: item.esManual || false,
+          precio_costo: item.precio_costo || 0
         })),
         metodoPago: metodo, 
         totalFinal,
@@ -323,7 +338,6 @@ async function confirmarVentaFinal() {
 
       if (error) throw new Error(error)
 
-      // Limpieza y éxito
       setTicketModal({ total: totalFinal })
       setCarrito([])
       setShowConfirmModal(false)
@@ -331,13 +345,28 @@ async function confirmarVentaFinal() {
       setBusqueda('')
 
       actualizarResumen()
-      toast(`✅ Venta/Ajuste registrado correctamente`)
+      toast('Venta registrada correctamente')
 
     } catch (err) { 
       toast(err.message, 'error') 
     } finally {
-      // IMPORTANTE: Liberamos el bloqueo siempre, pase lo que pase
-      isSubmitting.current = false;
+      isSubmitting.current = false
+      setLoading(false)
+    }
+  }
+
+  async function cambiarLocal(nuevoLocalId) {
+    const nuevaConfig = {
+      local_id: nuevoLocalId,
+      nombre_local: nuevoLocalId === 1 ? 'LOCAL 1' : 'LOCAL 2'
+    }
+    const ok = await saveLocalConfig(nuevaConfig)
+    if (ok) {
+      onConfigChange(nuevaConfig)
+      setShowLocalModal(false)
+      toast(`Cambiado a ${nuevaConfig.nombre_local}`)
+    } else {
+      toast('Error al guardar config', 'error')
     }
   }
   
@@ -366,7 +395,15 @@ async function confirmarVentaFinal() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: 80 }}>
         <div>
           <h2 style={{ fontSize: 30, fontWeight: 900, margin: 0, color: UI.title }}>Nueva Venta</h2>
-          <span style={{ fontSize: 16, fontWeight: 600, color: UI.subtitle }}>📍 {config.nombre_local}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 16, fontWeight: 600, color: UI.subtitle }}>📍 {config.nombre_local}</span>
+            {usuario.rol === 'admin' && (
+              <button onClick={() => setShowLocalModal(true)} title="Cambiar local"
+                style={{ background: 'none', border: '1px solid #787878', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 700, color: '#374151', cursor: 'pointer' }}>
+                CAMBIAR
+              </button>
+            )}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <VentaStatCard label="Ventas Hoy" value={resumen.cant} ui={UI} />
@@ -608,11 +645,11 @@ async function confirmarVentaFinal() {
 
           <VentaButton 
             ui={UI} 
-            onClick={() => setShowConfirmModal(true)} 
-            disabled={!carrito.length || (metodo === 'mixto' && faltaCubrirNeto > 0)}
+            onClick={() => !loading && setShowConfirmModal(true)} 
+            disabled={loading || !carrito.length || (metodo === 'mixto' && faltaCubrirNeto > 0)}
             style={{ width: 220 }}
           >
-            CONFIRMAR VENTA
+            {loading ? '⏳ PROCESANDO...' : 'CONFIRMAR VENTA'}
           </VentaButton>
         </div>
       </div>
@@ -628,9 +665,10 @@ async function confirmarVentaFinal() {
       />
       <div style={{ fontSize: 13, color: '#666', marginBottom: -10 }}>Monto</div>
       <input 
-        type="number" 
-        value={manualData.precio} 
-        onChange={e => setManualData({...manualData, precio: e.target.value})}  
+        type="text" 
+        inputMode="numeric"
+        value={manualData.precio ? Number(manualData.precio).toLocaleString('es-AR') : ''} 
+        onChange={e => setManualData({...manualData, precio: e.target.value.replace(/\D/g, '')})}  
         placeholder="0.00"
         style={{ 
           height: 44, 
@@ -670,21 +708,34 @@ async function confirmarVentaFinal() {
 )}
 
       {showConfirmModal && (
-        <VentaModal title="Confirmar Venta" onClose={() => setShowConfirmModal(false)} ui={UI}>
-          <div className="col" style={{ gap: 12 }}>
+        <VentaModal title="Confirmar Venta" onClose={() => !loading && setShowConfirmModal(false)} ui={UI}>
+          <div className="col" style={{ gap: 12, position: 'relative' }}>
+            {loading && (
+              <div style={{
+                position: 'absolute', inset: -24, background: 'rgba(255,255,255,0.7)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                borderRadius: 14, zIndex: 10, backdropFilter: 'blur(2px)'
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  background: '#fff', padding: '16px 24px', borderRadius: 12,
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.12)', fontWeight: 800, fontSize: 16
+                }}>
+                  <span style={{ fontSize: 22 }}>⏳</span> PROCESANDO VENTA...
+                </div>
+              </div>
+            )}
             <div className="row-between"><span>Subtotal:</span> <b>{fmt(subtotalCarrito)}</b></div>
             {recargoTarjeta > 0 && <div className="row-between" style={{ color: 'red' }}><span>Recargo Tarjeta:</span> <b>+{fmt(recargoTarjeta)}</b></div>}
             <div className="row-between" style={{ fontSize: 24, fontWeight: 900 }}><span>TOTAL:</span> <span style={{ color: UI.totalValue }}>{fmt(totalFinal)}</span></div>
             
-            {/* Botón de exportar PDF separado */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: 8 }}>
               <SoftIconButton 
                 onClick={async () => {
+                  if (loading) return
                   try {
                     const success = await exportarVentaPDF(carrito, totalFinal, metodo, localConfig.nombre, usuario.nombre, metodo === 'mixto' ? mixtoData : null)
-                    if (success) {
-                      toast('PDF guardado correctamente', 'success')
-                    }
+                    if (success) toast('PDF guardado correctamente', 'success')
                   } catch (error) {
                     toast('Error al guardar el PDF', 'error')
                   }
@@ -699,7 +750,43 @@ async function confirmarVentaFinal() {
               </SoftIconButton>
             </div>
 
-            <VentaButton ui={UI} onClick={confirmarVentaFinal}>COBRAR</VentaButton>
+            <VentaButton ui={UI} onClick={confirmarVentaFinal} disabled={loading}>
+              {loading ? (
+                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 20 }}>⏳</span><span>PROCESANDO...</span>
+                </span>
+              ) : 'COBRAR'}
+            </VentaButton>
+          </div>
+        </VentaModal>
+      )}
+
+      {showLocalModal && (
+        <VentaModal title="Cambiar Local" onClose={() => setShowLocalModal(false)} ui={UI}>
+          <div className="col" style={{ gap: 12 }}>
+            <p style={{ margin: 0, fontSize: 13, color: '#666' }}>Seleccioná el local para esta terminal:</p>
+            <button onClick={() => cambiarLocal(1)} style={{
+              ...stylesLocalBtn, borderColor: config.local_id === 1 ? '#16a34a' : '#ccc',
+              background: config.local_id === 1 ? '#f0fdf4' : '#fff'
+            }}>
+              <span style={{ fontSize: 16 }}>📍</span>
+              <div>
+                <div style={{ fontWeight: 800 }}>LOCAL 1</div>
+                <div style={{ fontSize: 11, color: '#666' }}>Calle Principal</div>
+              </div>
+              {config.local_id === 1 && <span style={{ marginLeft: 'auto', color: '#16a34a', fontWeight: 800 }}>ACTUAL</span>}
+            </button>
+            <button onClick={() => cambiarLocal(2)} style={{
+              ...stylesLocalBtn, borderColor: config.local_id === 2 ? '#16a34a' : '#ccc',
+              background: config.local_id === 2 ? '#f0fdf4' : '#fff'
+            }}>
+              <span style={{ fontSize: 16 }}>📍</span>
+              <div>
+                <div style={{ fontWeight: 800 }}>LOCAL 2</div>
+                <div style={{ fontSize: 11, color: '#666' }}>Sucursal</div>
+              </div>
+              {config.local_id === 2 && <span style={{ marginLeft: 'auto', color: '#16a34a', fontWeight: 800 }}>ACTUAL</span>}
+            </button>
           </div>
         </VentaModal>
       )}

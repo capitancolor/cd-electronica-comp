@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { getVentas, getGastos, registrarGasto, eliminarGasto, actualizarGasto } from '../services/negocio'
-import { Icon, Badge, toast } from '../components/UI'
+import { Icon, Badge, toast, ConfirmDialog } from '../components/UI'
 import { exportarGastosExcel } from '../services/exportExcel'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
@@ -32,6 +32,7 @@ export default function Gastos({ usuario }) {
   const [mesActual, setMesActual] = useState(hoy.getMonth())
   const [anioActual, setAnioActual] = useState(hoy.getFullYear())
   const [modal, setModal] = useState({ show: false, data: null })
+  const [eliminarId, setEliminarId] = useState(null)
 
   const estadoInicial = { descripcion: '', monto: '', dias_aplicados: [] }
 
@@ -111,14 +112,14 @@ async function cargarDatos() {
     } catch (err) { toast("Error al procesar", "error") } finally { setLoading(false) }
   }
 
-  const handleEliminar = async (id) => {
-    if (window.confirm('¿Eliminar este gasto?')) {
-      try {
-        await eliminarGasto(id)
-        cargarDatos()
-        toast("Eliminado")
-      } catch (err) { toast("Error", "error") }
-    }
+  const handleEliminar = async () => {
+    if (!eliminarId) return
+    try {
+      await eliminarGasto(eliminarId)
+      setEliminarId(null)
+      cargarDatos()
+      toast("Gasto eliminado")
+    } catch (err) { toast("Error", "error") }
   }
 
   const getGastoParaDia = (dia) => {
@@ -196,7 +197,7 @@ async function cargarDatos() {
                     <td style={{ ...styles.td, textAlign: 'right', fontWeight: 900, color: UI.statGastos }}>{fmt(g.monto)}</td>
                     <td style={{ ...styles.td, textAlign: 'center' }}>
                       <button onClick={() => abrirModal(g)} style={styles.actionBtn} title="Editar"><Icon name="tune" color={UI.accent} size={16} /></button>
-                      <button onClick={() => handleEliminar(g.id)} style={styles.actionBtn} title="Eliminar"><Icon name="trash" color="#ef4444" size={16} /></button>
+                      <button onClick={() => setEliminarId(g.id)} style={styles.actionBtn} title="Eliminar"><Icon name="trash" color="#ef4444" size={16} /></button>
                     </td>
                   </tr>
                 ))}
@@ -254,7 +255,7 @@ async function cargarDatos() {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <input placeholder="Descripción..." style={styles.input} value={modal.data.descripcion} onChange={e => setModal({...modal, data: {...modal.data, descripcion: e.target.value}})} />
-              <input type="number" placeholder="Monto Total" style={{ ...styles.input, fontSize: 18, fontWeight: 900 }} value={modal.data.monto} onChange={e => setModal({...modal, data: {...modal.data, monto: e.target.value}})} />
+              <input type="text" inputMode="numeric" placeholder="Monto Total" style={{ ...styles.input, fontSize: 18, fontWeight: 900 }} value={modal.data.monto ? Number(modal.data.monto).toLocaleString('es-AR') : ''} onChange={e => setModal({...modal, data: {...modal.data, monto: e.target.value.replace(/\D/g, '')}})} />
               
               <div style={styles.calendarContainer}>
                 <div style={{ display: 'flex', gap: 5, marginBottom: 10 }}>
@@ -317,6 +318,17 @@ async function cargarDatos() {
             </div>
           </div>
         </div>
+      )}
+
+      {eliminarId && (
+        <ConfirmDialog
+          title="Eliminar Gasto"
+          message="¿Estás seguro de eliminar este gasto? Esta acción no se puede deshacer."
+          confirmLabel="Eliminar"
+          danger
+          onConfirm={handleEliminar}
+          onClose={() => setEliminarId(null)}
+        />
       )}
     </div>
   )

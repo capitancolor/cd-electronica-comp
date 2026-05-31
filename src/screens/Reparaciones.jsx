@@ -294,10 +294,11 @@ export default function Reparaciones() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontWeight: 800, color: '#374151' }}>PRECIO FINAL:</span>
                   <input 
-                    type="number" 
+                    type="text"
+                    inputMode="numeric"
                     style={{...styles.modalInput, width: 150, fontSize: 20, fontWeight: 900, textAlign: 'right', color: UI.accent}} 
-                    value={modal.data.total} 
-                    onChange={e => setModal({...modal, data: {...modal.data, total: e.target.value}})} 
+                    value={modal.data.total ? Number(modal.data.total).toLocaleString('es-AR') : ''} 
+                    onChange={e => setModal({...modal, data: {...modal.data, total: e.target.value.replace(/\D/g, '')}})} 
                   />
                 </div>
               </div>
