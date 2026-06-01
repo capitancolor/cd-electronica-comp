@@ -42,6 +42,7 @@ export default function Gastos({ usuario }) {
   const [anioActual, setAnioActual] = useState(hoy.getFullYear())
   const [modal, setModal] = useState({ show: false, data: null })
   const [eliminarId, setEliminarId] = useState(null)
+  const [detalleDia, setDetalleDia] = useState(null)
 
   const estadoInicial = { descripcion: '', monto: '', dias_aplicados: [] }
 
@@ -136,15 +137,27 @@ async function cargarDatos() {
     } catch (err) { toast("Error", "error") }
   }
 
+  const calcularGastoParaDia = (gasto, dia) => {
+    const aplicados = gasto.dias_aplicados || Array.from({ length: diasEnMes }, (_, i) => i + 1)
+    if (!aplicados.includes(dia)) return 0
+    const totalCentavos = Math.round(Number(gasto.monto) * 100)
+    const porDiaCentavos = Math.floor(totalCentavos / aplicados.length)
+    const restoCentavos = totalCentavos - porDiaCentavos * aplicados.length
+    const ultimoDia = Math.max(...aplicados)
+    return (porDiaCentavos + (dia === ultimoDia ? restoCentavos : 0)) / 100
+  }
+
   const getGastoParaDia = (dia) => {
+    return gastos.reduce((acc, g) => acc + calcularGastoParaDia(g, dia), 0)
+  }
+
+  const getGastosDetalleParaDia = (dia) => {
     return gastos.reduce((acc, g) => {
-      const aplicados = g.dias_aplicados || Array.from({ length: diasEnMes }, (_, i) => i + 1)
-      if (!aplicados.includes(dia)) return acc
-      const porDia = Math.floor(Number(g.monto) / aplicados.length)
-      const resto = Number(g.monto) - porDia * aplicados.length
-      const ultimoDia = Math.max(...aplicados)
-      return acc + porDia + (dia === ultimoDia ? resto : 0)
-    }, 0)
+      const monto = calcularGastoParaDia(g, dia)
+      if (monto === 0) return acc
+      acc.push({ ...g, montoDia: monto })
+      return acc
+    }, [])
   }
 
   const totalGastosMes = gastos.reduce((s, g) => s + Number(g.monto), 0)
@@ -245,7 +258,9 @@ async function cargarDatos() {
                     <tr key={d} style={{ ...styles.tr, opacity: esFuturo ? 0.4 : 1 }}>
                       <td style={{ ...styles.td, fontWeight: 700 }}>Día {d}</td>
                       <td style={{ ...styles.td, textAlign: 'right', color: UI.statGanancia }}>{ganDia > 0 ? fmt(ganDia) : '-'}</td>
-                      <td style={{ ...styles.td, textAlign: 'right', color: UI.statGastos }}>{fmt(gDia)}</td>
+                      <td style={{ ...styles.td, textAlign: 'right', color: UI.statGastos }}>
+                        <span onClick={() => gDia > 0 && setDetalleDia({ dia: d, gastos: getGastosDetalleParaDia(d) })} style={{ cursor: gDia > 0 ? 'pointer' : 'default', textDecoration: gDia > 0 ? 'underline' : 'none', textDecorationStyle: 'dotted' }}>{fmt(gDia)}</span>
+                      </td>
                       <td style={{ ...styles.td, textAlign: 'right', fontWeight: 800, color: bal >= 0 ? UI.statGanancia : UI.statGastos }}>
                         {fmt(bal)}
                       </td>
@@ -349,6 +364,42 @@ async function cargarDatos() {
           onConfirm={handleEliminar}
           onClose={() => setEliminarId(null)}
         />
+      )}
+
+      {detalleDia && (
+        <div style={styles.overlay} onClick={() => setDetalleDia(null)}>
+          <div style={{ ...styles.modal, width: 450, maxHeight: '70vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 }}>
+              <h3 style={{ margin: 0, fontWeight: 900, fontSize: 15, color: '#000' }}>GASTOS DEL DÍA {detalleDia.dia}</h3>
+              <button onClick={() => setDetalleDia(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18 }}>✕</button>
+            </div>
+            <div style={{ overflow: 'auto', flex: 1 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: `2px solid ${UI.border}` }}>
+                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Descripción</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Días</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Total</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Hoy</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detalleDia.gastos.map(g => (
+                    <tr key={g.id} style={{ borderBottom: `1px solid ${UI.border}` }}>
+                      <td style={{ padding: '8px 10px', fontWeight: 700, color: '#000' }}>{g.descripcion}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'center', color: '#000' }}>{g.dias_aplicados?.length || diasEnMes}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', color: '#000' }}>{fmt(g.monto)}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 900, color: UI.statGastos }}>{fmt(g.montoDia)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ borderTop: `2px solid ${UI.border}`, padding: '12px 10px 0', textAlign: 'right', fontWeight: 900, fontSize: 15 }}>
+              Total día: {fmt(detalleDia.gastos.reduce((s, g) => s + g.montoDia, 0))}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
