@@ -3,7 +3,16 @@ import { getVentas, getGastos, registrarGasto, eliminarGasto, actualizarGasto } 
 import { Icon, Badge, toast, ConfirmDialog } from '../components/UI'
 import { exportarGastosExcel } from '../services/exportExcel'
 
-const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
+const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+const formatearMonto = (raw) => {
+  if (!raw) return ''
+  const parts = raw.split(',')
+  let intPart = parts[0].replace(/\D/g, '')
+  if (intPart.length > 1) intPart = intPart.replace(/^0+/, '')
+  const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+  return parts.length > 1 ? formattedInt + ',' + parts.slice(1).join('').slice(0, 2) : formattedInt
+}
 
 const UI = {
   headerBg: '#1f2937', headerText: '#191616', border: '#e5e7eb', accent: '#2563eb',
@@ -86,7 +95,7 @@ async function cargarDatos() {
   const abrirModal = (gasto = null) => {
     setModal({
       show: true,
-      data: gasto ? { ...gasto, dias_aplicados: gasto.dias_aplicados || [] } : { ...estadoInicial }
+      data: gasto ? { ...gasto, monto: gasto.monto != null ? String(gasto.monto).replace('.', ',') : '', dias_aplicados: gasto.dias_aplicados || [] } : { ...estadoInicial }
     })
   }
 
@@ -97,9 +106,14 @@ async function cargarDatos() {
     if (!data.descripcion || !data.monto) return toast("Completar descripción y monto", "error")
     setLoading(true)
     try {
+      const normalizarNumero = (v) => {
+        const s = String(v).trim()
+        if (s.includes(',')) return parseFloat(s.replace(/\./g, '').replace(',', '.'))
+        return parseFloat(s)
+      }
       const payload = {
         ...data,
-        monto: parseFloat(data.monto),
+        monto: normalizarNumero(data.monto),
         usuario_id: usuario.id,
         fecha: new Date(anioActual, mesActual, 1).toISOString(),
         dias_aplicados: data.dias_aplicados?.length > 0 ? data.dias_aplicados : null
@@ -255,7 +269,13 @@ async function cargarDatos() {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <input placeholder="Descripción..." style={styles.input} value={modal.data.descripcion} onChange={e => setModal({...modal, data: {...modal.data, descripcion: e.target.value}})} />
-              <input type="text" inputMode="numeric" placeholder="Monto Total" style={{ ...styles.input, fontSize: 18, fontWeight: 900 }} value={modal.data.monto ? Number(modal.data.monto).toLocaleString('es-AR') : ''} onChange={e => setModal({...modal, data: {...modal.data, monto: e.target.value.replace(/\D/g, '')}})} />
+              <input type="text" inputMode="decimal" placeholder="Monto Total" style={{ ...styles.input, fontSize: 18, fontWeight: 900 }} value={formatearMonto(modal.data.monto ?? '')} onChange={e => {
+                let raw = e.target.value.replace(/[^\d,]/g, '')
+                raw = raw.split(',').slice(0, 2).join(',')
+                const parts = raw.split(',')
+                if (parts.length === 2 && parts[1].length > 2) raw = parts[0] + ',' + parts[1].slice(0, 2)
+                setModal({...modal, data: {...modal.data, monto: raw}})
+              }} />
               
               <div style={styles.calendarContainer}>
                 <div style={{ display: 'flex', gap: 5, marginBottom: 10 }}>
