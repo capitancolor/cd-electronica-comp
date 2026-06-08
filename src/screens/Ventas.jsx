@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import Database from '@tauri-apps/plugin-sql' // <-- IMPORTANTE: Agregar esto
 import { supabase } from '../supabase' // Lo dejamos por si getResumenHoy lo necesita internamente
-import { registrarVenta, getVentaDetalle, getResumenHoy } from '../services/negocio' // Quitamos getProductos y getStockCantidad
-import { exportarVentaPDF } from '../services/exportPdf'
+import { registrarVenta, registrarNotaCredito, getVentaDetalle, getResumenHoy } from '../services/negocio'
+import { exportarVentaPDF, exportarNotaCreditoPDF } from '../services/exportPdf'
 import { Icon, toast } from '../components/UI'
 import { saveLocalConfig } from '../services/config'
 
@@ -107,6 +107,13 @@ const [filtroModelo, setFiltroModelo] = useState('')
   const [manualData, setManualData] = useState({ concepto: '', precio: '' })
   const [mixtoData, setMixtoData] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
 
+  const [showNcModal, setShowNcModal] = useState(false)
+  const [ncCarrito, setNcCarrito] = useState([])
+  const [ncBusqueda, setNcBusqueda] = useState('')
+  const [ncResultados, setNcResultados] = useState([])
+  const [ncMotivo, setNcMotivo] = useState('')
+  const ncTimer = useRef(null)
+
   const [carrito, setCarrito] = useState(() => {
     const userId = usuario?.id || 'anon'
     const guardado = localStorage.getItem(`carrito_${userId}`)
@@ -177,7 +184,33 @@ const cargarListasBase = async () => {
     localStorage.setItem(`carrito_${userId}`, JSON.stringify(carrito))
   }, [carrito, usuario?.id])
 
-
+  useEffect(() => {
+    if (!showNcModal) return
+    const q = ncBusqueda.trim()
+    clearTimeout(ncTimer.current)
+    ncTimer.current = setTimeout(async () => {
+      try {
+        const db = await Database.load("sqlite:cd_electronica.db")
+        let query = "SELECT * FROM productos WHERE activo = 1"
+        let params = []
+        if (q) {
+          const palabras = q.split(/\s+/).filter(Boolean)
+          const condiciones = palabras.map(() => "(nombre LIKE ? OR marca LIKE ? OR modelo LIKE ?)")
+          query += " AND (" + condiciones.join(" AND ") + ")"
+          for (const pal of palabras) {
+            const t = `%${pal}%`
+            params.push(t, t, t)
+          }
+        }
+        query += " LIMIT 30"
+        const data = await db.select(query, params)
+        setNcResultados(data || [])
+      } catch (e) {
+        console.error("Error en búsqueda NC:", e)
+      }
+    }, 250)
+    return () => clearTimeout(ncTimer.current)
+  }, [ncBusqueda, showNcModal])
 
   useEffect(() => {
     const cargar = async () => {
@@ -302,6 +335,8 @@ const cargarListasBase = async () => {
     return [...prev, { 
       producto_id: prod.id, 
       nombre: prod.nombre, 
+      marca: prod.marca || '',
+      modelo: prod.modelo || '',
       precio_unitario: precioFinal, 
       cantidad: 1,
       esManual: prod.esManual || false,
@@ -310,6 +345,67 @@ const cargarListasBase = async () => {
     }];
   });
   setBusqueda('');
+}
+
+function agregarANC(prod) {
+  setNcCarrito(prev => {
+    const idx = prev.findIndex(i => i.producto_id === prod.id)
+    if (idx >= 0) {
+      return prev.map((i, j) => j === idx ? { ...i, cantidad: i.cantidad + 1 } : i)
+    }
+    const precio = parseFloat(prod.precio_venta) || 0
+    return [...prev, {
+      producto_id: prod.id,
+      nombre: prod.nombre,
+      marca: prod.marca || '',
+      modelo: prod.modelo || '',
+      precio_unitario: precio,
+      cantidad: 1,
+      esManual: false
+    }]
+  })
+}
+
+async function confirmarNotaCredito() {
+  if (isSubmitting.current) return
+  if (ncCarrito.length === 0) return toast('Agregá al menos un producto', 'error')
+  if (!ncMotivo.trim()) return toast('Indicá el motivo de la devolución', 'error')
+
+  isSubmitting.current = true
+  setLoading(true)
+
+  try {
+    const { id, error } = await registrarNotaCredito({
+      localId: config.local_id,
+      usuarioId: usuario.id,
+      items: ncCarrito.map(item => ({
+        producto_id: item.producto_id,
+        nombre: item.nombre,
+        marca: item.marca,
+        modelo: item.modelo,
+        precio_unitario: item.precio_unitario,
+        cantidad: item.cantidad
+      })),
+      motivo: ncMotivo.trim()
+    })
+
+    if (error) throw new Error(error)
+
+    const totalNc = ncCarrito.reduce((s, i) => s + i.cantidad * i.precio_unitario, 0)
+    setTicketModal({ total: -totalNc, esNotaCredito: true })
+    setNcCarrito([])
+    setNcBusqueda('')
+    setNcMotivo('')
+    setShowNcModal(false)
+
+    actualizarResumen()
+    toast('Nota de Crédito registrada correctamente')
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    isSubmitting.current = false
+    setLoading(false)
+  }
 }
 
 async function confirmarVentaFinal() {
@@ -429,6 +525,15 @@ async function confirmarVentaFinal() {
         <button onClick={() => setShowManualModal(true)} style={{ height: 56, padding: '0 20px', borderRadius: 12, border: '2px solid #000', background: '#fff', fontWeight: 800, cursor: 'pointer' }}>
           + INGRESO MANUAL
         </button>
+        <button onClick={() => {
+          setNcBusqueda('')
+          setNcCarrito([])
+          setNcMotivo('')
+          setNcResultados([])
+          setShowNcModal(true)
+        }} style={{ height: 56, padding: '0 20px', borderRadius: 12, border: '2px solid #dc2626', background: '#fff', color: '#dc2626', fontWeight: 800, cursor: 'pointer' }}>
+          NOTA DE CRÉDITO
+        </button>
 
         {/* LISTA DE RESULTADOS FLOTANTE (Solo aparece al buscar) */}
         {busqueda.trim().length > 0 && (
@@ -537,8 +642,6 @@ async function confirmarVentaFinal() {
           </tr>
         ) : (
           carrito.map((item, i) => {
-            const pOriginal = resultados.find(p => p.id === item.producto_id) || {};
-            
             return (
               <tr key={`${item.producto_id}-${i}`} style={{ borderBottom: `1px solid ${UI.cartRowBorder}` }}>
                 {/* CANTIDAD CON BOTONES A LOS COSTADOS */}
@@ -590,8 +693,8 @@ async function confirmarVentaFinal() {
                   {item.esManual && <span style={{ marginLeft: 8, fontSize: 9, background: '#fee2e2', color: '#dc2626', padding: '2px 4px', borderRadius: 4 }}>MANUAL</span>}
                 </td>
                 
-                <td style={{ color: UI.subtitle, fontWeight: 600, fontSize: 13 }}>{pOriginal.marca || '-'}</td>
-                <td style={{ color: UI.subtitle, fontWeight: 600, fontSize: 13 }}>{pOriginal.modelo || '-'}</td>
+                <td style={{ color: UI.subtitle, fontWeight: 600, fontSize: 13 }}>{item.marca || '-'}</td>
+                <td style={{ color: UI.subtitle, fontWeight: 600, fontSize: 13 }}>{item.modelo || '-'}</td>
                 
                 <td align="right" style={{ fontWeight: 600, fontSize: 14 }}>{fmt(item.precio_unitario)}</td>
                 <td align="right" style={{ fontWeight: 900, fontSize: 16 }}>{fmt(item.cantidad * item.precio_unitario)}</td>
@@ -667,8 +770,8 @@ async function confirmarVentaFinal() {
       <input 
         type="text" 
         inputMode="numeric"
-        value={manualData.precio ? Number(manualData.precio).toLocaleString('es-AR') : ''} 
-        onChange={e => setManualData({...manualData, precio: e.target.value.replace(/\D/g, '')})}  
+        value={manualData.precio !== '' && !isNaN(Number(manualData.precio)) ? Number(manualData.precio).toLocaleString('es-AR') : manualData.precio} 
+        onChange={e => setManualData({...manualData, precio: e.target.value.replace(/[^\d-]/g, '')})}  
         placeholder="0.00"
         style={{ 
           height: 44, 
@@ -761,6 +864,172 @@ async function confirmarVentaFinal() {
         </VentaModal>
       )}
 
+      {showNcModal && (
+        <VentaModal title="Nota de Crédito — Devolución" onClose={() => !loading && setShowNcModal(false)} width={750} ui={UI}>
+          <div className="col" style={{ gap: 12 }}>
+            {loading && (
+              <div style={{
+                position: 'absolute', inset: -24, background: 'rgba(255,255,255,0.7)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                borderRadius: 14, zIndex: 10, backdropFilter: 'blur(2px)'
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  background: '#fff', padding: '16px 24px', borderRadius: 12,
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.12)', fontWeight: 800, fontSize: 16
+                }}>
+                  <span style={{ fontSize: 22 }}>⏳</span> PROCESANDO NOTA DE CRÉDITO...
+                </div>
+              </div>
+            )}
+
+            <input
+              value={ncBusqueda}
+              onChange={e => setNcBusqueda(e.target.value)}
+              placeholder="🔍 Buscar producto a devolver..."
+              style={{ height: 44, borderRadius: 8, border: '2px solid #dc2626', padding: '0 12px', fontSize: 15, fontWeight: 600 }}
+            />
+
+            {ncBusqueda.trim() && ncResultados.length > 0 && (
+              <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, maxHeight: 200, overflowY: 'auto', background: '#fff' }}>
+                {ncResultados.map(p => {
+                  const tieneStock = (Number(p[`stock_l${config.local_id}`]) || 0) > 0
+                  return (
+                    <div key={p.id} onClick={() => tieneStock && agregarANC(p)}
+                      style={{
+                        display: 'flex', alignItems: 'center', padding: '10px 12px', borderBottom: '1px solid #f0f0f0',
+                        cursor: tieneStock ? 'pointer' : 'not-allowed', opacity: tieneStock ? 1 : 0.45,
+                        transition: 'background 0.2s'
+                      }}
+                      onMouseEnter={e => tieneStock && (e.currentTarget.style.backgroundColor = '#fef2f2')}
+                      onMouseLeave={e => tieneStock && (e.currentTarget.style.backgroundColor = '#fff')}
+                    >
+                      <div style={{ flex: 2, fontWeight: 700, fontSize: 14 }}>{p.nombre}</div>
+                      <div style={{ width: 100, fontSize: 12, color: '#666' }}>{p.marca || '-'}</div>
+                      <div style={{ width: 100, fontSize: 12, color: '#666' }}>{p.modelo || '-'}</div>
+                      <div style={{ width: 90, textAlign: 'right', fontWeight: 800, fontSize: 13, color: '#dc2626' }}>
+                        {fmt(p.precio_venta)}
+                      </div>
+                      <div style={{ width: 70, textAlign: 'right', fontSize: 11, fontWeight: 700, color: tieneStock ? '#16a34a' : '#dc2626' }}>
+                        {tieneStock ? `${p[`stock_l${config.local_id}`]} u.` : 'SIN STOCK'}
+                      </div>
+                      <div style={{ width: 40, textAlign: 'right', color: '#dc2626' }}>
+                        <Icon name="plus" size={18} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {ncBusqueda.trim() && ncResultados.length === 0 && (
+              <div style={{ padding: 16, textAlign: 'center', color: '#999', fontSize: 13 }}>
+                No se encontraron productos
+              </div>
+            )}
+
+            {ncCarrito.length > 0 && (
+              <>
+                <div style={{ fontSize: 14, fontWeight: 800, color: '#dc2626', marginTop: 4 }}>
+                  Productos a devolver ({ncCarrito.length})
+                </div>
+                <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ background: '#fef2f2' }}>
+                        <th style={{ padding: '8px 10px', textAlign: 'left' }}>Producto</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'left' }}>Marca</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'left' }}>Modelo</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center', width: 80 }}>Cant.</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'right', width: 90 }}>P.Unit</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'right', width: 90 }}>Subtotal</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center', width: 40 }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ncCarrito.map((item, i) => (
+                        <tr key={i} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                          <td style={{ padding: '8px 10px', fontWeight: 700 }}>{item.nombre}</td>
+                          <td style={{ padding: '8px 10px', color: '#666', fontSize: 12 }}>{item.marca || '-'}</td>
+                          <td style={{ padding: '8px 10px', color: '#666', fontSize: 12 }}>{item.modelo || '-'}</td>
+                          <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                              <button onClick={() => setNcCarrito(c => c.map((x, j) => j === i ? { ...x, cantidad: Math.max(1, x.cantidad - 1) } : x))}
+                                style={{ border: '1px solid #ccc', background: '#fff', borderRadius: 4, cursor: 'pointer', padding: 2 }}>
+                                <Icon name="minus" size={10} color="#dc2626" />
+                              </button>
+                              <span style={{ fontWeight: 900, fontSize: 15, minWidth: 20, textAlign: 'center' }}>{item.cantidad}</span>
+                              <button onClick={() => setNcCarrito(c => c.map((x, j) => j === i ? { ...x, cantidad: x.cantidad + 1 } : x))}
+                                style={{ border: '1px solid #ccc', background: '#fff', borderRadius: 4, cursor: 'pointer', padding: 2 }}>
+                                <Icon name="plus" size={10} color="#dc2626" />
+                              </button>
+                            </div>
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{fmt(item.precio_unitario)}</td>
+                          <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#dc2626' }}>
+                            -{fmt(item.cantidad * item.precio_unitario)}
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            <button onClick={() => setNcCarrito(c => c.filter((_, j) => j !== i))}
+                              style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', padding: 4 }}>
+                              <Icon name="x" size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                  <div style={{ fontSize: 13, color: '#666' }}>
+                    Total a descontar del balance
+                  </div>
+                  <div style={{ fontSize: 24, fontWeight: 900, color: '#dc2626' }}>
+                    -{fmt(ncCarrito.reduce((s, i) => s + i.cantidad * i.precio_unitario, 0))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            <input
+              value={ncMotivo}
+              onChange={e => setNcMotivo(e.target.value)}
+              placeholder="Motivo de la devolución (obligatorio)..."
+              style={{ height: 44, borderRadius: 8, border: '1px solid #ccc', padding: '0 12px', fontSize: 14, fontWeight: 600 }}
+            />
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <VentaButton ui={UI} onClick={confirmarNotaCredito} disabled={loading || !ncCarrito.length || !ncMotivo.trim()}
+                  style={{ background: '#dc2626', borderColor: '#dc2626', fontSize: 15 }}>
+                  {loading ? '⏳' : 'CONFIRMAR NOTA DE CRÉDITO'}
+                </VentaButton>
+              </div>
+              <SoftIconButton
+                onClick={async () => {
+                  if (loading || !ncCarrito.length) return
+                  try {
+                    const totalNc = ncCarrito.reduce((s, i) => s + i.cantidad * i.precio_unitario, 0)
+                    const success = await exportarNotaCreditoPDF(ncCarrito, totalNc, localConfig.nombre, usuario.nombre, ncMotivo.trim())
+                    if (success) toast('PDF guardado correctamente', 'success')
+                  } catch (error) {
+                    toast('Error al guardar el PDF', 'error')
+                  }
+                }}
+                title="Exportar PDF de la Nota de Crédito"
+                color="#dc2626"
+                hoverBg="#fef2f2"
+                hoverBorder="#dc2626"
+                style={{ padding: 12, borderRadius: 8 }}
+              >
+                <Icon name="printer" size={24} />
+              </SoftIconButton>
+            </div>
+          </div>
+        </VentaModal>
+      )}
+
       {showLocalModal && (
         <VentaModal title="Cambiar Local" onClose={() => setShowLocalModal(false)} ui={UI}>
           <div className="col" style={{ gap: 12 }}>
@@ -792,9 +1061,12 @@ async function confirmarVentaFinal() {
       )}
 
       {ticketModal && (
-        <VentaModal title="Venta Exitosa" onClose={() => setTicketModal(null)} ui={UI}>
+        <VentaModal title={ticketModal.esNotaCredito ? 'Nota de Crédito Exitosa' : 'Venta Exitosa'} onClose={() => setTicketModal(null)} ui={UI}>
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontSize: 32, fontWeight: 900, color: UI.ticketAmount }}>{fmt(ticketModal?.total || 0)}</div>
+            <div style={{ fontSize: ticketModal.esNotaCredito ? 24 : 32, fontWeight: 900, color: ticketModal.esNotaCredito ? '#dc2626' : UI.ticketAmount }}>
+              {ticketModal.esNotaCredito ? `-$${Math.abs(ticketModal.total).toLocaleString('es-AR')}` : fmt(ticketModal?.total || 0)}
+            </div>
+            {ticketModal.esNotaCredito && <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>Stock restaurado correctamente</div>}
           </div>
           <VentaButton ui={UI} onClick={() => setTicketModal(null)}>Listo</VentaButton>
         </VentaModal>

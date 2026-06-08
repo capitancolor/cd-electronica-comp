@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { getVentas, getLocales, getCategorias, eliminarVenta } from '../services/negocio'
+import { getVentas, getLocales, getCategorias, eliminarVenta, actualizarVenta, getProductos } from '../services/negocio'
 import { supabase } from '../supabase'
-import { Icon, Badge, ConfirmDialog } from '../components/UI'
+import { Icon, Badge, ConfirmDialog, toast } from '../components/UI'
 import { exportarProductosExcel } from "../services/exportExcel"
 
 const fmt = v => '$' + Number(v).toLocaleString('es-AR', { maximumFractionDigits: 0 })
@@ -141,6 +141,12 @@ export default function Reportes({ usuario, config }) {
   const [filtroCategoria, setFiltroCategoria] = useState('')
   const [ventaDetalleVisible, setVentaDetalleVisible] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [editandoVenta, setEditandoVenta] = useState(null);
+  const [editItems, setEditItems] = useState([]);
+  const [editSaving, setEditSaving] = useState(false);
+  const [busquedaProd, setBusquedaProd] = useState('');
+  const [resultadosProd, setResultadosProd] = useState([]);
+  const [buscandoProd, setBuscandoProd] = useState(false);
   const esVendedor = usuario.rol === 'vendedor';
   
   // CONFIGURACIÓN DE SORT IDÉNTICA A STOCK
@@ -388,6 +394,17 @@ export default function Reportes({ usuario, config }) {
         <td style={{ padding: 14, textAlign: 'right', fontWeight: 800, color: UI.priceText }}>{fmt(precio)}</td>
         {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: ganancia >= 0 ? UI.profitPositive : UI.profitNegative, fontWeight: 800 }}>{fmt(ganancia)}</td>}
             <td style={{ padding: '0 10px', textAlign: 'center' }}>
+              <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditandoVenta(v);
+                    setEditItems((v.venta_items || []).map(it => ({ ...it, producto_id: it.producto_id || it.productos?.id, nombre: it.productos?.nombre || it.descripcion })));
+                  }}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Icon name="edit" size={16} />
+                </button>
                 <button 
                 onClick={(e) => {
                   e.stopPropagation();
@@ -397,6 +414,7 @@ export default function Reportes({ usuario, config }) {
               >
                 <Icon name="trash" size={16} />
               </button>
+              </div>
             </td>
           </tr>
         );
@@ -484,6 +502,181 @@ export default function Reportes({ usuario, config }) {
       >
         ENTENDIDO
       </button>
+    </div>
+  </div>
+)}
+
+{editandoVenta && (
+  <div
+    onClick={() => { if (!editSaving) setEditandoVenta(null) }}
+    style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 20 }}
+  >
+    <div
+      onClick={e => e.stopPropagation()}
+      style={{ background: '#fff', padding: 24, borderRadius: 16, width: '100%', maxWidth: 500, boxShadow: '0 20px 25px -5px rgba(0,0,0,0.2)', border: '1px solid #000', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+    >
+      <div className="row-between" style={{ marginBottom: 16, borderBottom: `1px solid ${UI.divider}`, paddingBottom: 12 }}>
+        <div className="col">
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>EDITAR VENTA</h3>
+          <span style={{ fontSize: 11, color: UI.pageMuted }}>
+            {new Date(editandoVenta.fecha).toLocaleString('es-AR')} — {editandoVenta.local_nombre}
+          </span>
+        </div>
+        <button onClick={() => { if (!editSaving) setEditandoVenta(null) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: UI.pageMuted }}>
+          <Icon name="x" size={20} />
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', paddingRight: 5, marginBottom: 16 }}>
+        {/* BUSCADOR DE PRODUCTOS */}
+        <div style={{ position: 'relative', marginBottom: 12 }}>
+          <input
+            type="text"
+            placeholder="Buscar producto para agregar..."
+            value={busquedaProd}
+            onChange={async e => {
+              setBusquedaProd(e.target.value);
+              const q = e.target.value.trim();
+              if (q.length < 1) { setResultadosProd([]); return; }
+              setBuscandoProd(true);
+              const res = await getProductos({ busqueda: q });
+              setResultadosProd(res.filter(p => !editItems.some(it => it.producto_id === p.id)));
+              setBuscandoProd(false);
+            }}
+            style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #9ca3af', fontSize: 13, boxSizing: 'border-box' }}
+          />
+          {buscandoProd && <div style={{ position: 'absolute', right: 12, top: 12, fontSize: 11, color: '#999' }}>Buscando...</div>}
+          {resultadosProd.length > 0 && (
+            <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '1px solid #d1d5db', borderRadius: 8, zIndex: 100, maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+              {resultadosProd.map(p => (
+                <div
+                  key={p.id}
+                  onClick={() => {
+                    setEditItems(prev => [...prev, {
+                      producto_id: p.id,
+                      nombre: p.nombre,
+                      cantidad: 1,
+                      precio_unitario: Number(p.precio_venta || 0),
+                      descripcion: p.nombre,
+                      es_manual: false
+                    }]);
+                    setBusquedaProd('');
+                    setResultadosProd([]);
+                  }}
+                  style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                  onMouseOver={e => e.currentTarget.style.background = '#f3f4f6'}
+                  onMouseOut={e => e.currentTarget.style.background = '#fff'}
+                >
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{p.nombre}</span>
+                  <span style={{ fontSize: 12, color: '#2563eb', fontWeight: 700 }}>{fmt(p.precio_venta)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={{ fontSize: 10, fontWeight: 800, color: UI.pageMuted, marginBottom: 10, letterSpacing: 0.5 }}>PRODUCTOS:</div>
+        {editItems.map((item, i) => (
+          <div key={i} style={{
+            padding: '12px',
+            background: '#f8fafc',
+            borderRadius: 10,
+            marginBottom: 8,
+            border: '1px solid #e2e8f0',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: '#111827', flex: 1 }}>{item.nombre}</span>
+              <button
+                onClick={() => setEditItems(prev => prev.filter((_, idx) => idx !== i))}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: 4, flexShrink: 0 }}
+              >
+                <Icon name="trash" size={14} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#666', display: 'block', marginBottom: 2 }}>CANT</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={item.cantidad}
+                  onChange={e => {
+                    const val = Math.max(0, parseInt(e.target.value) || 0);
+                    setEditItems(prev => prev.map((it, idx) => idx === i ? { ...it, cantidad: val } : it));
+                  }}
+                  style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13, boxSizing: 'border-box' }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#666', display: 'block', marginBottom: 2 }}>PRECIO UNIT.</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={item.precio_unitario}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value) || 0;
+                    setEditItems(prev => prev.map((it, idx) => idx === i ? { ...it, precio_unitario: val } : it));
+                  }}
+                  style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13, boxSizing: 'border-box' }}
+                />
+              </div>
+              <div style={{ flex: '0 0 70px', textAlign: 'right' }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#666', display: 'block', marginBottom: 2 }}>SUB</label>
+                <span style={{ fontSize: 13, fontWeight: 900, color: '#2563eb' }}>{fmt((item.cantidad || 0) * (item.precio_unitario || 0))}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+        {editItems.length === 0 && (
+          <div style={{ padding: 20, textAlign: 'center', fontSize: 12, color: UI.pageMuted, background: '#f8fafc', borderRadius: 10 }}>
+            No hay productos en esta venta.
+          </div>
+        )}
+      </div>
+
+      <div style={{ paddingTop: 16, borderTop: `2px solid #000` }}>
+        <div className="row-between" style={{ fontSize: 15, fontWeight: 900, marginBottom: 16 }}>
+          <span>TOTAL:</span>
+          <span style={{ color: UI.statGanancia, fontSize: 22 }}>{fmt(editItems.reduce((s, it) => s + (it.cantidad || 0) * (it.precio_unitario || 0), 0))}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={async () => {
+              if (editSaving) return;
+              const itemsValidos = editItems.filter(it => it.cantidad > 0);
+              if (itemsValidos.length === 0) return toast('Debe haber al menos un producto con cantidad > 0', 'error');
+              setEditSaving(true);
+              const res = await actualizarVenta({
+                ventaId: editandoVenta.id,
+                items: itemsValidos,
+                localId: editandoVenta.local_id,
+                usuarioId: usuario.id,
+                metodoPago: editandoVenta.metodo_pago
+              });
+              setEditSaving(false);
+              if (res.ok) {
+                toast('Venta actualizada', 'success');
+                setEditandoVenta(null);
+                generar();
+              } else {
+                toast('Error: ' + (res.msg || 'No se pudo actualizar'), 'error');
+              }
+            }}
+            disabled={editSaving}
+            style={{ flex: 1, height: 48, borderRadius: 12, background: '#2563eb', color: '#fff', fontWeight: 800, border: 'none', cursor: editSaving ? 'not-allowed' : 'pointer', fontSize: 14, opacity: editSaving ? 0.7 : 1 }}
+          >
+            {editSaving ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
+          </button>
+          <button
+            onClick={() => { if (!editSaving) setEditandoVenta(null) }}
+            disabled={editSaving}
+            style={{ height: 48, borderRadius: 12, background: '#374151', color: '#fff', fontWeight: 700, border: 'none', cursor: editSaving ? 'not-allowed' : 'pointer', fontSize: 14, padding: '0 24px', opacity: editSaving ? 0.7 : 1 }}
+          >
+            CANCELAR
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 )}

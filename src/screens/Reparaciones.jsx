@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { getReparaciones, guardarReparacion, eliminarReparacion } from '../services/negocio'
+import { getReparaciones, guardarReparacion, eliminarReparacion, getTecnicos } from '../services/negocio'
 import { Icon, toast } from '../components/UI'
 import { supabase } from '../supabase'
 import Database from '@tauri-apps/plugin-sql'
@@ -22,11 +22,16 @@ export default function Reparaciones() {
   const [modal, setModal] = useState({ show: false, data: null })
   const [sortConfig, setSortConfig] = useState({ field: 'fecha', direction: 'desc' })
   const [showTecnicos, setShowTecnicos] = useState(false)
+  const [tecnicosList, setTecnicosList] = useState([])
+
+  useEffect(() => {
+    getTecnicos().then(setTecnicosList).catch(() => {})
+  }, [])
 
   const estadoInicial = { 
     fecha: new Date().toISOString().split('T')[0],
     cliente: '', telefono: '', equipo: '', marca: '', modelo: '', 
-    problema: '', arreglo: '', accesorios: '', service: false, total: 0, estado: 'Pendiente'
+    problema: '', arreglo: '', accesorios: '', service: false, total: 0, estado: 'Pendiente', tecnico_id: null
   }
 
   const cargar = async () => {
@@ -172,12 +177,13 @@ export default function Reparaciones() {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead style={{ position: 'sticky', top: 0, background: UI.headerBg, zIndex: 10 }}>
             <tr>
-              <SortableTh label="FECHA" field="fecha" width="10%" />
-              <SortableTh label="CLIENTE" field="cliente" width="16%" />
-              <SortableTh label="EQUIPO" field="equipo" width="14%" />
-              <SortableTh label="MARCA" field="marca" width="12%" />
-              <SortableTh label="MODELO" field="modelo" width="12%" />
-              <SortableTh label="ESTADO" field="estado" width="12%" />
+              <SortableTh label="FECHA" field="fecha" width="9%" />
+              <SortableTh label="CLIENTE" field="cliente" width="14%" />
+              <SortableTh label="EQUIPO" field="equipo" width="13%" />
+              <SortableTh label="MARCA" field="marca" width="10%" />
+              <SortableTh label="MODELO" field="modelo" width="10%" />
+              <SortableTh label="TÉCNICO" field="tecnico_id" width="10%" />
+              <SortableTh label="ESTADO" field="estado" width="10%" />
               <SortableTh label="TOTAL" field="total" width="10%" />
               <th style={{ ...styles.th, textAlign: 'center', width: '14%' }}>ACCIONES</th>
             </tr>
@@ -193,6 +199,7 @@ export default function Reparaciones() {
                 <td style={{ ...styles.td, fontWeight: 600 }}>{r.equipo}</td>
                 <td style={styles.td}>{r.marca || '-'}</td>
                 <td style={styles.td}>{r.modelo || '-'}</td>
+                <td style={styles.td}>{tecnicosList.find(t => t.id === r.tecnico_id)?.nombre || '-'}</td>
                 <td style={styles.td}>
                   <select value={r.estado || 'Pendiente'} onChange={e => handleCambiarEstado(r.id, e.target.value)}
                     style={{
@@ -285,6 +292,13 @@ export default function Reparaciones() {
                     <option value="En Progreso">En Progreso</option>
                     <option value="Completado">Completado</option>
                     <option value="Entregado">Entregado</option>
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={styles.label}>Técnico Asignado</label>
+                  <select value={modal.data.tecnico_id || ''} onChange={e => setModal({...modal, data: {...modal.data, tecnico_id: e.target.value ? Number(e.target.value) : null}})} style={styles.modalInput}>
+                    <option value="">Sin asignar</option>
+                    {tecnicosList.map(t => <option key={t.id} value={t.id}>{t.nombre}</option>)}
                   </select>
                 </div>
               </div>

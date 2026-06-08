@@ -652,6 +652,88 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
   }
 }
 
+export async function registrarNotaCredito({ localId, usuarioId, items, motivo }) {
+  const db = await Database.load("sqlite:cd_electronica.db");
+  const total = items.reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
+
+  const restaurarStockLocal = async () => {
+    for (const item of items) {
+      if (item.producto_id && !item.es_manual) {
+        const columnaStock = localId === 1 ? 'stock_l1' : 'stock_l2';
+        await db.execute(
+          `UPDATE productos SET ${columnaStock} = ${columnaStock} + ? WHERE id = ?`,
+          [item.cantidad, item.producto_id]
+        );
+      }
+    }
+  };
+
+  if (!window.navigator.onLine) {
+    const fecha = new Date().toISOString();
+    await db.execute(
+      "INSERT INTO ventas_pendientes (payload, fecha) VALUES (?, ?)",
+      [JSON.stringify({ localId, usuarioId, items, metodoPago: 'nota_credito', totalFinal: -total, esNotaCredito: true, motivo, fecha }), fecha]
+    );
+    await restaurarStockLocal();
+    return { id: 'OFFLINE_OK', offline: true };
+  }
+
+  try {
+    const { data: venta, error } = await supabase.from('ventas').insert([{
+      local_id: localId,
+      usuario_id: usuarioId,
+      total: -total,
+      metodo_pago: 'nota_credito',
+      detalle_mixto: { motivo, es_nota_credito: true },
+      fecha: new Date().toISOString()
+    }]).select().single();
+
+    if (error) throw error;
+
+    const detalleInsert = items.map(item => ({
+      venta_id: venta.id,
+      producto_id: item.producto_id || null,
+      descripcion: item.nombre || "Producto",
+      cantidad: item.cantidad,
+      precio_unitario: item.precio_unitario,
+      subtotal: -(item.cantidad * item.precio_unitario)
+    }));
+    await supabase.from('venta_items').insert(detalleInsert);
+
+    for (const item of items) {
+      if (item.producto_id && !item.es_manual) {
+        const actual = await getStockCantidad(item.producto_id, localId);
+        await supabase.from('stock').update({
+          cantidad: (actual || 0) + item.cantidad
+        }).eq('producto_id', item.producto_id).eq('local_id', localId);
+
+        await supabase.from('movimientos_stock').insert({
+          producto_id: item.producto_id,
+          local_id: localId,
+          tipo: 'entrada',
+          cantidad: item.cantidad,
+          referencia: `Nota Crédito: ${motivo || 'Devolución'}`,
+          usuario_id: usuarioId
+        });
+
+        const columnaStock = localId === 1 ? 'stock_l1' : 'stock_l2';
+        await db.execute(
+          `UPDATE productos SET ${columnaStock} = ? WHERE id = ?`,
+          [(actual || 0) + item.cantidad, item.producto_id]
+        );
+      }
+    }
+
+    return { id: 'OK', total: -total };
+  } catch (error) {
+    if (checkOfflineError(error)) {
+      await restaurarStockLocal();
+      return { id: 'OFFLINE_OK', offline: true };
+    }
+    throw error;
+  }
+}
+
 export async function getVentas({ localId = null, fechaDesde = null, fechaHasta = null, limit = 1000 } = {}) {
     const db = await Database.load("sqlite:cd_electronica.db");
 
@@ -841,6 +923,118 @@ export async function eliminarVenta(id) {
         console.error("Error eliminando venta:", error);
         return { ok: false, msg: error.message };
     }
+}
+
+export async function actualizarVenta({ ventaId, items, localId, usuarioId, metodoPago }) {
+  const db = await Database.load("sqlite:cd_electronica.db");
+
+  if (!window.navigator.onLine) {
+    return { ok: false, msg: "No podés editar ventas sin conexión." };
+  }
+
+  try {
+    const { data: venta, error: errV } = await supabase.from('ventas')
+      .select('*, venta_items(*)')
+      .eq('id', ventaId)
+      .maybeSingle();
+    if (errV) throw errV;
+    if (!venta) return { ok: false, msg: 'Venta no encontrada' };
+
+    const oldItems = venta.venta_items || [];
+    let localRestore = venta.local_id;
+    const dm = venta.detalle_mixto;
+    if (dm && typeof dm === 'object' && dm.local_original) {
+      localRestore = dm.local_original;
+    } else if (dm && typeof dm === 'object' && venta.metodo_pago === 'tarjeta') {
+      const { data: hermanas } = await supabase.from('ventas')
+        .select('local_id')
+        .eq('fecha', venta.fecha)
+        .neq('id', ventaId)
+        .limit(1);
+      if (hermanas && hermanas.length > 0) localRestore = hermanas[0].local_id;
+    }
+
+    const restoreLocalId = localId || localRestore;
+
+    // 1. Restaurar stock de items viejos
+    for (const it of oldItems) {
+      if (!it.producto_id || !it.cantidad) continue;
+      const { data: stockActual } = await supabase.from('stock')
+        .select('cantidad')
+        .eq('producto_id', it.producto_id)
+        .eq('local_id', restoreLocalId)
+        .maybeSingle();
+      const nuevaCant = (stockActual?.cantidad || 0) + it.cantidad;
+      if (stockActual) {
+        await supabase.from('stock').update({ cantidad: nuevaCant })
+          .eq('producto_id', it.producto_id)
+          .eq('local_id', restoreLocalId);
+      } else {
+        await supabase.from('stock').insert({ producto_id: it.producto_id, local_id: restoreLocalId, cantidad: nuevaCant });
+      }
+      const columna = restoreLocalId === 1 ? 'stock_l1' : 'stock_l2';
+      await db.execute(`UPDATE productos SET ${columna} = ? WHERE id = ?`, [nuevaCant, it.producto_id]);
+    }
+
+    // 2. Descontar stock de items nuevos
+    for (const item of items) {
+      if (item.producto_id && !item.es_manual) {
+        const { data: stockActual } = await supabase.from('stock')
+          .select('cantidad')
+          .eq('producto_id', item.producto_id)
+          .eq('local_id', restoreLocalId)
+          .maybeSingle();
+        const nuevaCant = Math.max(0, (stockActual?.cantidad || 0) - item.cantidad);
+        if (stockActual) {
+          await supabase.from('stock').update({ cantidad: nuevaCant })
+            .eq('producto_id', item.producto_id)
+            .eq('local_id', restoreLocalId);
+        } else {
+          await supabase.from('stock').insert({ producto_id: item.producto_id, local_id: restoreLocalId, cantidad: nuevaCant });
+        }
+        const columna = restoreLocalId === 1 ? 'stock_l1' : 'stock_l2';
+        await db.execute(`UPDATE productos SET ${columna} = ? WHERE id = ?`, [nuevaCant, item.producto_id]);
+      }
+    }
+
+    // 3. Reemplazar venta_items
+    await supabase.from('venta_items').delete().eq('venta_id', ventaId);
+    const newTotal = items.reduce((s, i) => s + (i.cantidad || 0) * (i.precio_unitario || 0), 0);
+    const detalleInsert = items.map(item => ({
+      venta_id: ventaId,
+      producto_id: item.producto_id || null,
+      descripcion: item.nombre || item.descripcion || "Producto",
+      cantidad: item.cantidad,
+      precio_unitario: item.precio_unitario,
+      subtotal: (item.cantidad || 0) * (item.precio_unitario || 0)
+    }));
+    const { error: errInsert } = await supabase.from('venta_items').insert(detalleInsert);
+    if (errInsert) throw errInsert;
+
+    // 4. Actualizar total de la venta
+    const { error: errUpdate } = await supabase.from('ventas')
+      .update({ total: newTotal, metodo_pago: metodoPago || venta.metodo_pago })
+      .eq('id', ventaId);
+    if (errUpdate) throw errUpdate;
+
+    // 5. Actualizar cache local
+    await db.execute("DELETE FROM venta_items_local WHERE venta_id = ?", [ventaId]);
+    for (const it of items) {
+      await db.execute(
+        "INSERT INTO venta_items_local (venta_id, producto_id, nombre, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)",
+        [ventaId, it.producto_id, it.nombre || it.descripcion || "Producto", it.cantidad, it.precio_unitario]
+      );
+    }
+    await db.execute(
+      `UPDATE ventas SET total = ?, productos_nombres = ? WHERE id = ?`,
+      [newTotal, items.map(i => i.nombre || i.descripcion).filter(Boolean).join(', '), ventaId]
+    );
+
+    return { ok: true };
+  } catch (error) {
+    console.error("Error actualizando venta:", error);
+    return { ok: false, msg: error.message };
+  }
 }
 
 /**
@@ -1103,7 +1297,11 @@ export async function guardarCliente(cliente) {
     cuit: cliente.cuit || null, 
     telefono: cliente.telefono || null, 
     email: cliente.email || null, 
-    direccion: cliente.direccion || null 
+    direccion: cliente.direccion || null,
+    razon_social: cliente.razon_social || null,
+    alias: cliente.alias || null,
+    nro_cuenta: cliente.nro_cuenta || null,
+    condicion_iva: cliente.condicion_iva || 'Consumidor Final'
   };
   if (cliente.id) payload.id = cliente.id; // Puede ser un update
 
