@@ -153,9 +153,9 @@ export default function Tecnicos({ onClose }) {
                       <td style={{ padding: 10 }}>
                         <span style={{
                           padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700,
-                          color: r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : '#6b7280',
-                          background: r.estado === 'Entregado' ? '#f0fdf4' : r.estado === 'En Progreso' ? '#eff6ff' : r.estado === 'Completado' ? '#fffbeb' : '#f9fafb',
-                        }}>{r.estado || 'Pendiente'}</span>
+                          color: r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : r.estado === 'Sin Arreglo' ? '#dc2626' : '#6b7280',
+                          background: r.estado === 'Entregado' ? '#f0fdf4' : r.estado === 'En Progreso' ? '#eff6ff' : r.estado === 'Completado' ? '#fffbeb' : r.estado === 'Sin Arreglo' ? '#fef2f2' : '#f9fafb',
+                        }}>{r.estado || 'En Progreso'}</span>
                       </td>
                       <td style={{ padding: 10, fontWeight: 800, textAlign: 'right' }}>{fmt(r.costo)}</td>
                     </tr>

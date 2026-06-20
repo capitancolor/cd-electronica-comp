@@ -537,10 +537,10 @@ export async function getStockCantidad(productoId, localId) {
 /**
  * VENTAS
  */
-export async function registrarVenta({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto }) {
+export async function registrarVenta({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto, reparacion_id }) {
   const db = await Database.load("sqlite:cd_electronica.db");
   const costoTotalItems = items.reduce((sum, it) => sum + (it.cantidad || 0) * (it.precio_costo || 0), 0);
-  const detalleConOrigen = metodoPago === 'mixto' ? { ...(detalleMixto || {}), local_original: localId, costo_total: costoTotalItems } : null;
+  const detalleConOrigen = (metodoPago === 'mixto' || detalleMixto?.es_reparacion) ? { ...(detalleMixto || {}), local_original: localId, costo_total: costoTotalItems } : null;
 
   const descontarStockLocal = async () => {
     for (const item of items) {
@@ -559,7 +559,7 @@ export async function registrarVenta({ localId, usuarioId, items, metodoPago, to
     const fecha = new Date().toISOString();
     await db.execute(
       "INSERT INTO ventas_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto, fecha }), fecha]
+      [JSON.stringify({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto, fecha, reparacion_id }), fecha]
     );
     await descontarStockLocal();
     return { id: 'OFFLINE_OK', offline: true };
@@ -678,13 +678,19 @@ export async function registrarNotaCredito({ localId, usuarioId, items, motivo }
     return { id: 'OFFLINE_OK', offline: true };
   }
 
+  const costoTotal = items.reduce((s, it) => s + it.cantidad * (it.precio_costo || 0), 0);
+
   try {
+    const fechasCompra = items.reduce((acc, it) => {
+      if (it.fecha_compra) acc[it.producto_id] = it.fecha_compra;
+      return acc;
+    }, {});
     const { data: venta, error } = await supabase.from('ventas').insert([{
       local_id: localId,
       usuario_id: usuarioId,
       total: -total,
       metodo_pago: 'nota_credito',
-      detalle_mixto: { motivo, es_nota_credito: true },
+      detalle_mixto: { motivo, es_nota_credito: true, costo_proporcional: -costoTotal, ...(Object.keys(fechasCompra).length && { fechas_compra: fechasCompra }) },
       fecha: new Date().toISOString()
     }]).select().single();
 
@@ -693,7 +699,7 @@ export async function registrarNotaCredito({ localId, usuarioId, items, motivo }
     const detalleInsert = items.map(item => ({
       venta_id: venta.id,
       producto_id: item.producto_id || null,
-      descripcion: item.nombre || "Producto",
+      descripcion: item.fecha_compra ? `${item.nombre} (Compra: ${item.fecha_compra})` : (item.nombre || "Producto"),
       cantidad: item.cantidad,
       precio_unitario: item.precio_unitario,
       subtotal: -(item.cantidad * item.precio_unitario)
@@ -759,7 +765,7 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             productos_marcas: [...new Set(v.venta_items?.map(i => i.productos?.marca).filter(Boolean))].join(', '),
             productos_modelos: [...new Set(v.venta_items?.map(i => i.productos?.modelo).filter(Boolean))].join(', '),
             categorias_nombres: [...new Set(v.venta_items?.map(i => i.productos?.categorias?.nombre).filter(Boolean))].join(', ') || 'Sin categoría',
-            costo_total: v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
+            costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
             venta_items: v.venta_items?.map(item => ({
                 ...item,
                 categoria_nombre: item.productos?.categorias?.nombre || 'Sin categoría'
@@ -769,9 +775,9 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
         // --- 2. SINCRONIZACIÓN AL ESPEJO LOCAL ---
         for (const v of formattedData) {
             await db.execute(
-                `INSERT OR REPLACE INTO ventas (id, fecha, total, metodo_pago, local_id, local_nombre, vendedor, productos_nombres, productos_marcas, productos_modelos, costo_total) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [v.id, v.fecha, v.total, v.metodo_pago, v.local_id, v.local_nombre, v.vendedor, v.productos_nombres, v.productos_marcas, v.productos_modelos, v.costo_total]
+                `INSERT OR REPLACE INTO ventas (id, fecha, total, metodo_pago, local_id, local_nombre, vendedor, productos_nombres, productos_marcas, productos_modelos, costo_total, detalle_mixto) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [v.id, v.fecha, v.total, v.metodo_pago, v.local_id, v.local_nombre, v.vendedor, v.productos_nombres, v.productos_marcas, v.productos_modelos, v.costo_total, v.detalle_mixto ? JSON.stringify(v.detalle_mixto) : null]
             );
             
             if (v.venta_items) {
@@ -800,10 +806,13 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             
             const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
 
-            // B. Rehidratar los items de cada venta (Para que el contador de Reportes.jsx no de 0)
+            // B. Rehidratar los items y detalle_mixto de cada venta
             for (let v of historial) {
                 const items = await db.select("SELECT * FROM venta_items_local WHERE venta_id = ?", [v.id]);
-                v.venta_items = items; // Esto arregla el cálculo de "Artículos Vendidos"
+                v.venta_items = items;
+                if (v.detalle_mixto && typeof v.detalle_mixto === 'string') {
+                    v.detalle_mixto = JSON.parse(v.detalle_mixto);
+                }
             }
 
             // C. Pendientes (Ventas que hiciste sin wifi y todavía no subieron)
@@ -819,7 +828,7 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
                     local_nombre: p.localId === 1 ? 'LOCAL 1' : 'LOCAL 2',
                     vendedor: 'Vendedor Offline',
                     productos_nombres: p.items?.map(i => i.nombre || i.descripcion).join(', '),
-                    costo_total: 0,
+                    costo_total: p.detalleMixto?.costo_reparacion || 0,
                     venta_items: p.items, // Importante para la UI
                     offline: true
                 };
@@ -1053,8 +1062,8 @@ export async function getGastos(desde, hasta) {
       // Sync desde Supabase
       for (const g of data) {
         await db.execute(
-          "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-          [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id]
+          "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, metodo_pago, sincronizado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+          [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, g.metodo_pago || 'efectivo']
         );
         // Restaurar dias_aplicados si existían localmente
         if (mapa[g.id]) {
@@ -1090,7 +1099,8 @@ export async function registrarGasto(gasto) {
     monto: parseFloat(gasto.monto || 0),
     categoria: gasto.categoria || 'VARIOS',
     local_id: gasto.local_id ? parseInt(gasto.local_id) : null,
-    usuario_id: gasto.usuario_id ? parseInt(gasto.usuario_id) : null, 
+    usuario_id: gasto.usuario_id ? parseInt(gasto.usuario_id) : null,
+    metodo_pago: gasto.metodo_pago || 'efectivo',
     sincronizado: 1 
   };
   const diasAplicados = gasto.dias_aplicados?.length > 0 ? JSON.stringify(gasto.dias_aplicados) : null;
@@ -1110,10 +1120,10 @@ export async function registrarGasto(gasto) {
     if (error) throw error;
     const g = data;
     await db.execute(
-      "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
-      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados]
+      "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados, payload.metodo_pago]
     );
-    return { ...g, dias_aplicados: gasto.dias_aplicados };
+    return { ...g, dias_aplicados: gasto.dias_aplicados, metodo_pago: payload.metodo_pago };
   } catch (error) {
     if (checkOfflineError(error)) return await guardarGastoOffline();
     throw error;
@@ -1127,15 +1137,16 @@ export async function actualizarGasto(id, cambios) {
     monto: parseFloat(cambios.monto),
     categoria: cambios.categoria,
     local_id: cambios.local_id ? parseInt(cambios.local_id) : null,
-    usuario_id: cambios.usuario_id ? parseInt(cambios.usuario_id) : null
+    usuario_id: cambios.usuario_id ? parseInt(cambios.usuario_id) : null,
+    metodo_pago: cambios.metodo_pago || 'efectivo'
   };
   const diasAplicados = cambios.dias_aplicados?.length > 0 ? JSON.stringify(cambios.dias_aplicados) : null;
   const { error } = await supabase.from('gastos').update(payload).eq('id', id);
   if (error) throw error;
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute(
-    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, dias_aplicados = ? WHERE id = ?",
-    [payload.fecha, payload.descripcion, payload.monto, payload.categoria, payload.local_id, payload.usuario_id, diasAplicados, id]
+    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, metodo_pago = ?, dias_aplicados = ? WHERE id = ?",
+    [payload.fecha, payload.descripcion, payload.monto, payload.categoria, payload.local_id, payload.usuario_id, payload.metodo_pago, diasAplicados, id]
   );
 }
 
@@ -1207,7 +1218,22 @@ export async function getReparaciones(busqueda = '') {
     }
 
     const data = await db.select(sql, params);
-    return data.map(r => ({ ...r, total: r.costo }));
+      return data.map(r => {
+      if (r.problema) {
+        const mm = r.problema.match(/^MARCA\/MODELO:\s*(.*?)\s*$/m);
+        if (mm) {
+          const parts = mm[1].trim().split(/\s+/);
+          if (!r.marca) r.marca = parts[0] || '';
+          if (!r.modelo) r.modelo = parts.slice(1).join(' ') || '';
+        }
+        const ac = r.problema.match(/^ACCESORIOS:\s*(.*?)\s*$/m);
+        if (ac && !r.accesorios) r.accesorios = ac[1].trim();
+        const tr = r.problema.match(/^TRABAJO:\s*(.*?)\s*$/m);
+        if (tr && !r.arreglo) r.arreglo = tr[1].trim();
+      }
+      const repuestos = r.repuestos ? (typeof r.repuestos === 'string' ? JSON.parse(r.repuestos) : r.repuestos) : [];
+      return { ...r, precio: r.precio || 0, total: r.precio || r.costo || 0, repuestos };
+    });
   } catch (error) {
     console.error("Error leyendo reparaciones de SQLite:", error);
     return [];
@@ -1227,18 +1253,23 @@ FALLA: ${reparacion.problema || ''}
 ACCESORIOS: ${reparacion.accesorios || ''}
 TRABAJO: ${reparacion.arreglo || ''}
     `.trim(),
-    estado: reparacion.id ? (reparacion.estado || 'Pendiente') : 'Pendiente',
-    costo: parseFloat(reparacion.total || 0),
+    estado: reparacion.id ? (reparacion.estado || 'En Progreso') : 'En Progreso',
+    precio: parseFloat(String(reparacion.precio || '0').replace(/\./g, '').replace(',', '.')),
+    costo: parseFloat(String(reparacion.costo || '0').replace(/\./g, '').replace(',', '.')),
     tecnico_id: reparacion.tecnico_id ? parseInt(reparacion.tecnico_id) : null
   };
 
   // 1. Guardar primero en SQLite local (siempre funciona)
   const id = reparacion.id || Date.now()
+  const repuestosJson = reparacion.repuestos?.length > 0 ? JSON.stringify(reparacion.repuestos) : null;
   await db.execute(`
     INSERT OR REPLACE INTO reparaciones (
-      id, cliente, equipo, problema, estado, costo, fecha, tecnico_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, payload.cliente, payload.equipo, payload.problema, payload.estado, payload.costo, payload.fecha, payload.tecnico_id]
+      id, cliente, equipo, problema, estado, precio, costo, fecha, tecnico_id,
+      marca, modelo, telefono, accesorios, arreglo, repuestos, cobrado
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, payload.cliente, payload.equipo, payload.problema, payload.estado, payload.precio, payload.costo, payload.fecha, payload.tecnico_id,
+     reparacion.marca || '', reparacion.modelo || '', reparacion.telefono || '', reparacion.accesorios || '', reparacion.arreglo || '',
+     repuestosJson, reparacion.cobrado ? 1 : 0]
   );
 
   // 2. Intentar en Supabase (si falla, el local ya quedó guardado)
@@ -1270,29 +1301,47 @@ export async function eliminarReparacion(id) {
 }
 
 export async function getClientes(busqueda = '') {
-  try {
-    let query = supabase.from('clientes').select('*').order('nombre', { ascending: true });
-    if (busqueda.trim()) query = query.or(`nombre.ilike.%${busqueda.trim()}%,cuit.ilike.%${busqueda.trim()}%`);
-    const { data, error } = await query;
-    if (error) throw error;
-    if (data) localStorage.setItem('cd_clientes_cache', JSON.stringify(data));
-    return data || [];
-  } catch (error) {
-    if (checkOfflineError(error)) {
-      let cache = JSON.parse(localStorage.getItem('cd_clientes_cache') || '[]');
-      if (busqueda.trim()) {
-        const b = busqueda.toLowerCase();
-        cache = cache.filter(c => c.nombre?.toLowerCase().includes(b) || c.cuit?.toLowerCase().includes(b));
+  const db = await Database.load("sqlite:cd_electronica.db");
+
+  // 1. Sincronizar desde Supabase a SQLite local si hay conexión
+  if (window.navigator.onLine) {
+    try {
+      let query = supabase.from('clientes').select('*').order('nombre', { ascending: true });
+      if (busqueda.trim()) query = query.or(`nombre.ilike.%${busqueda.trim()}%,cuit.ilike.%${busqueda.trim()}%`);
+      const { data, error } = await query;
+      if (!error && data) {
+        localStorage.setItem('cd_clientes_cache', JSON.stringify(data));
+        for (const c of data) {
+          await db.execute(
+            `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [c.id, c.nombre, c.cuit, c.telefono, c.email, c.direccion, c.razon_social, c.alias, c.nro_cuenta, c.condicion_iva]
+          );
+        }
       }
-      return cache;
+    } catch (e) {
+      console.warn("Supabase no disponible para clientes:", e.message);
     }
-    throw error;
   }
+
+  // 2. Siempre leer desde SQLite local (tiene todo: sync + guardados locales)
+  let sql = "SELECT * FROM clientes";
+  let params = [];
+  if (busqueda.trim()) {
+    sql += " WHERE nombre LIKE ? OR cuit LIKE ?";
+    const t = `%${busqueda.trim()}%`;
+    params = [t, t];
+  }
+  sql += " ORDER BY nombre";
+  return await db.select(sql, params);
 }
 
 export async function guardarCliente(cliente) {
   const db = await Database.load("sqlite:cd_electronica.db");
+
+  const id = cliente.id || Date.now();
   const payload = { 
+    id,
     nombre: cliente.nombre, 
     cuit: cliente.cuit || null, 
     telefono: cliente.telefono || null, 
@@ -1303,33 +1352,46 @@ export async function guardarCliente(cliente) {
     nro_cuenta: cliente.nro_cuenta || null,
     condicion_iva: cliente.condicion_iva || 'Consumidor Final'
   };
-  if (cliente.id) payload.id = cliente.id; // Puede ser un update
 
-  const guardarClienteOffline = async () => {
-    await db.execute(
-      "INSERT INTO clientes_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify(payload), new Date().toISOString()]
-    );
-    return { offline: true };
-  };
+  // 1. Guardar primero en SQLite local (siempre funciona)
+  await db.execute(
+    `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [payload.id, payload.nombre, payload.cuit, payload.telefono, payload.email, payload.direccion, payload.razon_social, payload.alias, payload.nro_cuenta, payload.condicion_iva]
+  );
 
-  if (!window.navigator.onLine) return await guardarClienteOffline();
-
+  // 2. Intentar en Supabase (si falla, el local ya quedó guardado)
   try {
     const { data, error } = await supabase.from('clientes').upsert(payload).select().single();
-    if (error) throw error;
-    return data;
-  } catch (error) {
-    if (checkOfflineError(error)) return await guardarClienteOffline();
-    throw error;
+    if (!error && data && data.id !== id) {
+      await db.execute("UPDATE clientes SET id = ? WHERE id = ?", [data.id, id]);
+      payload.id = data.id;
+    }
+    if (error) {
+      await db.execute(
+        "INSERT OR REPLACE INTO clientes_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+        [JSON.stringify(payload), new Date().toISOString()]
+      );
+    }
+  } catch (e) {
+    console.warn("Supabase no disponible, guardado solo local:", e.message);
+    await db.execute(
+      "INSERT OR REPLACE INTO clientes_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+      [JSON.stringify(payload), new Date().toISOString()]
+    );
   }
+
+  return payload;
 }
 
 export async function eliminarCliente(id) {
-  const { error } = await supabase.from('clientes').delete().eq('id', id);
-  if (error) throw error;
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute("DELETE FROM clientes WHERE id = ?", [id]);
+  try {
+    await supabase.from('clientes').delete().eq('id', id);
+  } catch (e) {
+    console.warn("Supabase no disponible al eliminar cliente:", e.message);
+  }
 }
 
 /**
@@ -1516,9 +1578,14 @@ export async function procesarClientesPendientes() {
         for (const row of pendientes) {
             try {
                 const payload = JSON.parse(row.payload);
-                const { error } = await supabase.from('clientes').upsert(payload);
+                const { data, error } = await supabase.from('clientes').upsert(payload).select().single();
                 
-                if (!error) {
+                if (!error && data) {
+                    await db.execute(
+                        `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [data.id, data.nombre, data.cuit, data.telefono, data.email, data.direccion, data.razon_social, data.alias, data.nro_cuenta, data.condicion_iva]
+                    );
                     await db.execute("DELETE FROM clientes_pendientes WHERE id = ?", [row.id]);
                     console.log(`Cliente pendiente ID ${row.id} sincronizado.`);
                 }
@@ -1546,8 +1613,9 @@ export async function sincronizarClientes() {
                 }
 
                 await db.execute(
-                    "INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, fecha_creacion) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [c.id, c.nombre, c.cuit, c.telefono, c.email, c.direccion, c.fecha_creacion]
+                    `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva, fecha_creacion)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [c.id, c.nombre, c.cuit, c.telefono, c.email, c.direccion, c.razon_social, c.alias, c.nro_cuenta, c.condicion_iva, c.fecha_creacion]
                 );
             }
         }
@@ -1660,9 +1728,9 @@ export async function sincronizarReparacionesMaestras() {
                 // 2. Si no hay conflicto, actualizamos nuestro espejo local
                 await db.execute(
                     `INSERT OR REPLACE INTO reparaciones 
-                    (id, cliente, equipo, problema, estado, costo, fecha) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                    [r.id, r.cliente, r.equipo, r.problema, r.estado, r.costo, r.fecha]
+                    (id, cliente, equipo, problema, estado, costo, fecha, repuestos, cobrado) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [r.id, r.cliente, r.equipo, r.problema, r.estado, r.costo, r.fecha, r.repuestos || null, r.cobrado ? 1 : 0]
                 );
             }
         }
@@ -1707,6 +1775,15 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
 `);
         // Migración: agregar tecnico_id si no existe (bases viejas)
         try { await db.execute("ALTER TABLE reparaciones ADD COLUMN tecnico_id INTEGER"); } catch (e) {}
+        // Migración: columnas para datos individuales
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN marca TEXT"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN modelo TEXT"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN telefono TEXT"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN accesorios TEXT"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN arreglo TEXT"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN repuestos TEXT"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN cobrado INTEGER DEFAULT 0"); } catch (e) {}
+        try { await db.execute("ALTER TABLE reparaciones ADD COLUMN precio REAL DEFAULT 0"); } catch (e) {}
 
         // --- TABLA TECNICOS ---
         await db.execute(`
@@ -1797,9 +1874,17 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
                 telefono TEXT,
                 email TEXT,
                 direccion TEXT,
+                razon_social TEXT,
+                alias TEXT,
+                nro_cuenta TEXT,
+                condicion_iva TEXT DEFAULT 'Consumidor Final',
                 fecha_creacion TEXT
             );
         `);
+        try { await db.execute("ALTER TABLE clientes ADD COLUMN razon_social TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE clientes ADD COLUMN alias TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE clientes ADD COLUMN nro_cuenta TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE clientes ADD COLUMN condicion_iva TEXT DEFAULT 'Consumidor Final'"); } catch (_) {}
 
         // --- TABLA VENTAS (Para modo Offline) ---
         await db.execute(`
@@ -1827,6 +1912,7 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
         // Migración: agregar columnas nuevas si no existen
         try { await db.execute("ALTER TABLE ventas ADD COLUMN productos_marcas TEXT"); } catch (_) {}
         try { await db.execute("ALTER TABLE ventas ADD COLUMN productos_modelos TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE ventas ADD COLUMN detalle_mixto TEXT"); } catch (_) {}
 
 await db.execute(`
     CREATE TABLE IF NOT EXISTS venta_items_local (
@@ -1869,6 +1955,13 @@ await db.execute(`
         // --- MIGRACIÓN: agregar columna dias_aplicados a gastos ---
         try {
             await db.execute("ALTER TABLE gastos ADD COLUMN dias_aplicados TEXT");
+        } catch (e) {
+            // ya existe, ignorar
+        }
+
+        // --- MIGRACIÓN: agregar columna metodo_pago a gastos ---
+        try {
+            await db.execute("ALTER TABLE gastos ADD COLUMN metodo_pago TEXT DEFAULT 'efectivo'");
         } catch (e) {
             // ya existe, ignorar
         }
@@ -2137,6 +2230,15 @@ export async function procesarVentasPendientes() {
                 if (res.id === 'OK') {
                     await db.execute("DELETE FROM ventas_pendientes WHERE id = ?", [row.id]);
                     console.log(`Venta pendiente ID ${row.id} sincronizada y eliminada del local.`);
+
+                    // Si la venta viene de un cobro de reparación, marcar cobrado en Supabase
+                    if (v.reparacion_id) {
+                        try {
+                            await supabase.from('reparaciones').update({ cobrado: true, estado: 'Entregado' }).eq('id', v.reparacion_id);
+                        } catch (e) {
+                            console.warn("Supabase no disponible al actualizar reparación:", e.message);
+                        }
+                    }
                 }
             } catch (err) {
                 console.error(`Error procesando la venta pendiente ${row.id}:`, err);
@@ -2166,6 +2268,11 @@ export async function guardarTecnico(data) {
       [data.nombre.trim(), data.telefono || null, data.especialidad || null]);
     data.id = r.lastInsertId;
   }
+  try {
+    await supabase.from('tecnicos').upsert({ id: data.id, nombre: data.nombre.trim(), telefono: data.telefono || null, especialidad: data.especialidad || null });
+  } catch (e) {
+    console.warn("Supabase no disponible al guardar técnico:", e.message);
+  }
   return data;
 }
 
@@ -2173,6 +2280,11 @@ export async function eliminarTecnico(id) {
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute("UPDATE reparaciones SET tecnico_id = NULL WHERE tecnico_id = ?", [id]);
   await db.execute("DELETE FROM tecnicos WHERE id = ?", [id]);
+  try {
+    await supabase.from('tecnicos').delete().eq('id', id);
+  } catch (e) {
+    console.warn("Supabase no disponible al eliminar técnico:", e.message);
+  }
 }
 
 export async function getReparacionesPorTecnico(tecnicoId) {
@@ -2181,4 +2293,80 @@ export async function getReparacionesPorTecnico(tecnicoId) {
     "SELECT id, cliente, equipo, problema, estado, costo, fecha FROM reparaciones WHERE tecnico_id = ? ORDER BY fecha DESC",
     [tecnicoId]
   );
+}
+
+/**
+ * COBRAR REPARACIONES
+ */
+export async function getReparacionesSinCobrar(busqueda = '') {
+  const db = await Database.load("sqlite:cd_electronica.db");
+  let sql = "SELECT * FROM reparaciones WHERE cobrado IS NULL OR cobrado = 0";
+  let params = [];
+  if (busqueda.trim()) {
+    sql += " AND (cliente LIKE ? OR equipo LIKE ?)";
+    const t = `%${busqueda.trim()}%`;
+    params = [t, t];
+  }
+  sql += " ORDER BY fecha DESC";
+  const data = await db.select(sql, params);
+  return data.map(r => {
+    const repuestos = r.repuestos ? JSON.parse(r.repuestos) : [];
+    return { ...r, precio: r.precio || 0, total: r.precio || r.costo || 0, repuestos };
+  });
+}
+
+export async function registrarPagoReparacion({ reparacionId, localId, usuarioId, metodoPago }) {
+  const db = await Database.load("sqlite:cd_electronica.db");
+
+  const [reparacion] = await db.select("SELECT * FROM reparaciones WHERE id = ?", [reparacionId]);
+  if (!reparacion) throw new Error("Reparación no encontrada");
+
+  const repuestos = reparacion.repuestos ? JSON.parse(reparacion.repuestos) : [];
+  const total = reparacion.precio || reparacion.costo || 0;
+
+  const itemsRepuesto = repuestos.map(r => ({
+    producto_id: r.producto_id,
+    nombre: r.nombre || 'Repuesto reparación',
+    precio_unitario: 0,
+    cantidad: r.cantidad,
+    es_manual: false,
+    precio_costo: 0
+  }));
+
+  const descripcion = `REPARACIÓN: ${reparacion.cliente} - ${reparacion.equipo}`;
+  const itemReparacion = {
+    producto_id: null,
+    nombre: descripcion,
+    precio_unitario: total,
+    cantidad: 1,
+    es_manual: true,
+    precio_costo: 0
+  };
+
+  const items = [itemReparacion, ...itemsRepuesto];
+
+  // Marcar reparación como cobrada en local ANTES de registrarVenta
+  // (para que si el stock se descuente offline, quede registrado)
+  await db.execute("UPDATE reparaciones SET cobrado = 1, estado = 'Entregado' WHERE id = ?", [reparacionId]);
+
+  const res = await registrarVenta({
+    localId,
+    usuarioId,
+    items,
+    metodoPago,
+    totalFinal: total,
+    detalleMixto: { es_reparacion: true, costo_reparacion: reparacion.costo || 0 },
+    reparacion_id: reparacionId
+  });
+
+  if (res.id === 'OK' || res.id === 'OFFLINE_OK') {
+    try {
+      await supabase.from('reparaciones').update({ cobrado: true, estado: 'Entregado' }).eq('id', reparacionId);
+    } catch (e) {
+      console.warn("Supabase no disponible al marcar cobrado:", e.message);
+    }
+    return { ...res, reparacionId };
+  }
+
+  throw new Error("Error al registrar pago de reparación");
 }

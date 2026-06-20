@@ -4,7 +4,7 @@ import { supabase } from '../supabase'
 import { Icon, Badge, ConfirmDialog, toast } from '../components/UI'
 import { exportarProductosExcel } from "../services/exportExcel"
 
-const fmt = v => '$' + Number(v).toLocaleString('es-AR', { maximumFractionDigits: 0 })
+const fmt = v => '$' + Number(v).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 /* =========================
    PALETA VISUAL UNIFICADA
@@ -136,9 +136,11 @@ export default function Reportes({ usuario, config }) {
   const [loading, setLoading] = useState(false)
   const [mesSeleccionado, setMesSeleccionado] = useState(new Date().getMonth() + 1)
   const [añoSeleccionado, setAñoSeleccionado] = useState(new Date().getFullYear())
+  const [diaSeleccionado, setDiaSeleccionado] = useState(0)
   const [filtroMetodo, setFiltroMetodo] = useState('')
   const [categorias, setCategorias] = useState([])
   const [filtroCategoria, setFiltroCategoria] = useState('')
+  const [busquedaTexto, setBusquedaTexto] = useState('')
   const [ventaDetalleVisible, setVentaDetalleVisible] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [editandoVenta, setEditandoVenta] = useState(null);
@@ -165,10 +167,23 @@ export default function Reportes({ usuario, config }) {
       let desde, hasta;
       if (periodo === 'hoy') { desde = hoyStr(); hasta = hoyStr(); } 
       else if (periodo === 'mes') { desde = inicioMesStr(); hasta = hoyStr(); } 
-      else {
-        desde = `${añoSeleccionado}-${String(mesSeleccionado).padStart(2, '0')}-01`;
-        const ultimoDia = new Date(añoSeleccionado, mesSeleccionado, 0).getDate();
-        hasta = `${añoSeleccionado}-${String(mesSeleccionado).padStart(2, '0')}-${ultimoDia}`;
+      else if (añoSeleccionado && mesSeleccionado) {
+        if (diaSeleccionado) {
+          const dd = String(diaSeleccionado).padStart(2, '0');
+          const mm = String(mesSeleccionado).padStart(2, '0');
+          desde = `${añoSeleccionado}-${mm}-${dd}`;
+          hasta = desde;
+        } else {
+          desde = `${añoSeleccionado}-${String(mesSeleccionado).padStart(2, '0')}-01`;
+          const ultimoDia = new Date(añoSeleccionado, mesSeleccionado, 0).getDate();
+          hasta = `${añoSeleccionado}-${String(mesSeleccionado).padStart(2, '0')}-${ultimoDia}`;
+        }
+      } else if (añoSeleccionado) {
+        desde = `${añoSeleccionado}-01-01`;
+        hasta = `${añoSeleccionado}-12-31`;
+      } else {
+        desde = null;
+        hasta = null;
       }
 
       const v = await getVentas({
@@ -189,7 +204,7 @@ export default function Reportes({ usuario, config }) {
       setVentas(resultado)
     } catch (error) { console.error("Error:", error) } 
     finally { setLoading(false) }
-  }, [filtroLocal, periodo, mesSeleccionado, añoSeleccionado]);
+  }, [filtroLocal, periodo, mesSeleccionado, añoSeleccionado, diaSeleccionado]);
 
   const handleDelete = async () => {
     if (!confirmDelete) return;
@@ -248,6 +263,18 @@ export default function Reportes({ usuario, config }) {
         v.venta_items?.some(item => item.categoria_nombre === filtroCategoria)
       )
     }
+
+    if (busquedaTexto.trim()) {
+      const q = busquedaTexto.trim().toLowerCase()
+      result = result.filter(v =>
+        (v.productos_nombres || '').toLowerCase().includes(q) ||
+        (v.productos_marcas || '').toLowerCase().includes(q) ||
+        (v.productos_modelos || '').toLowerCase().includes(q) ||
+        (v.vendedor || '').toLowerCase().includes(q) ||
+        (v.local_nombre || '').toLowerCase().includes(q) ||
+        (v.metodo_pago || '').toLowerCase().includes(q)
+      )
+    }
     
     return result.sort((a, b) => {
       let valA = a[sortConfig.key] || ''
@@ -262,11 +289,33 @@ export default function Reportes({ usuario, config }) {
       if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
     })
-  }, [ventas, filtroMetodo, filtroCategoria, sortConfig])
+  }, [ventas, filtroMetodo, filtroCategoria, sortConfig, busquedaTexto])
 
   const totalPeriodo = ventas.reduce((s, v) => s + Number(v.total || 0), 0)
-  const gananciaTotal = ventas.reduce((acc, v) => acc + (Number(v.total || 0) - Number(v.costo_total || 0)), 0)
+  const gananciaTotal = ventas.reduce((acc, v) => {
+    const base = Number(v.total || 0) - Number(v.costo_total || 0);
+    const recargaExtra = (v.venta_items || [])
+      .filter(i => !i.producto_id && i.descripcion?.startsWith('RECARGA'))
+      .reduce((s, i) => s + i.cantidad * i.precio_unitario * 0.90, 0);
+    const notaDebito = (v.venta_items || [])
+      .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
+      .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
+    return acc + base - recargaExtra - notaDebito;
+  }, 0)
   const costoTotalPeriodo = ventas.reduce((s, v) => s + Number(v.costo_total || 0), 0)
+  const efectivoTotal = ventas.reduce((s, v) => {
+    if (v.metodo_pago === 'efectivo') return s + Number(v.total || 0)
+    if (v.metodo_pago === 'mixto') return s + Number(v.detalle_mixto?.efectivo || 0)
+    return s
+  }, 0)
+  const tarjetaTransferenciaTotal = ventas.reduce((s, v) => {
+    if (v.metodo_pago === 'tarjeta') return s + Number(v.total || 0)
+    if (v.metodo_pago === 'transferencia') return s + Number(v.total || 0)
+    if (v.metodo_pago === 'mixto') {
+      return s + Number(v.detalle_mixto?.tarjeta || 0) + Number(v.detalle_mixto?.transferencia || 0)
+    }
+    return s
+  }, 0)
   
   // NUEVO CÁLCULO: Cantidad de artículos vendidos (suma de cantidades en venta_items)
   const articulosVendidos = ventas.reduce((acc, v) => {
@@ -301,17 +350,24 @@ export default function Reportes({ usuario, config }) {
 
           {periodo === 'historial' && (
             <div style={{ display: 'inline-flex', flexDirection: 'row', gap: 6, alignItems: 'center' }}>
-              <select value={añoSeleccionado} onChange={e => setAñoSeleccionado(Number(e.target.value))} style={{ height: 40, padding: '0 10px', background: UI.selectBg, border: `1px solid ${UI.selectBorder}`, borderRadius: 10, fontWeight: 600, width: 90 }}>
+              <select value={añoSeleccionado} onChange={e => setAñoSeleccionado(Number(e.target.value) || 0)} style={{ height: 40, padding: '0 10px', background: UI.selectBg, border: `1px solid ${UI.selectBorder}`, borderRadius: 10, fontWeight: 600, width: 90 }}>
+                <option value={0}>Todos</option>
                 {[2024, 2025, 2026].map(a => <option key={a} value={a}>{a}</option>)}
               </select>
               <select value={mesSeleccionado} onChange={e => setMesSeleccionado(Number(e.target.value))} style={{ height: 40, padding: '0 10px', background: UI.selectBg, border: `1px solid ${UI.selectBorder}`, borderRadius: 10, fontWeight: 600, width: 120 }}>
+                <option value={0}>Todos</option>
                 {['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'].map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+              </select>
+              <select value={diaSeleccionado} onChange={e => setDiaSeleccionado(Number(e.target.value) || 0)} style={{ height: 40, padding: '0 10px', background: UI.selectBg, border: `1px solid ${UI.selectBorder}`, borderRadius: 10, fontWeight: 600, width: 90 }}>
+                <option value={0}>Todos</option>
+                {Array.from({ length: 31 }, (_, i) => i + 1).map(d => <option key={d} value={d}>{d}</option>)}
               </select>
             </div>
           )}
         </div>
 
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input value={busquedaTexto} onChange={e => setBusquedaTexto(e.target.value)} placeholder="🔍 Buscar..." style={{ width: 170, height: 40, padding: '0 10px', background: UI.selectBg, border: `1px solid ${UI.selectBorder}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }} />
           <select value={filtroMetodo} onChange={e => setFiltroMetodo(e.target.value)} style={{ width: 150, height: 40, padding: '0 10px', background: UI.selectBg, border: `1px solid ${UI.selectBorder}`, borderRadius: 10, fontWeight: 600 }}>
             {OPCIONES_PAGO.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
           </select>
@@ -336,12 +392,6 @@ export default function Reportes({ usuario, config }) {
         <div style={{ display: 'flex', justifyContent: 'center', padding: 60 }}><div className="spinner" /></div>
       ) : (
         <div className="scroll-area col" style={{ gap: 16, flex: 1, overflow: 'hidden' }}>
-          <div style={{ display: 'flex', gap: 10, width: '100%', overflowX: 'auto', paddingBottom: 4 }}>
-            <ReportStatCard label="Total Ingresos" value={fmt(totalPeriodo)} icon="cart" color={UI.statIngresos} ui={UI} />
-            <ReportStatCard label="Total Ganancia" value={fmt(gananciaTotal)} icon="reports" color={UI.statGanancia} ui={UI} />
-            <ReportStatCard label="Articulos vendidos" value={articulosVendidos} icon="stock" color={UI.statOperaciones} ui={UI} />
-          </div>
-
           <div className="table-container" style={{ flex: 1, overflowY: 'auto', background: UI.tableWrapBg, border: `1px solid ${UI.tableWrapBorder}`, borderRadius: 12 }}>  
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
   <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
@@ -351,6 +401,7 @@ export default function Reportes({ usuario, config }) {
       <SortableTh label="MARCA" field="productos_marcas" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="MODELO" field="productos_modelos" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="LOCAL" field="local_nombre" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="VENDEDOR" field="vendedor" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="PAGO" field="metodo_pago" sortConfig={sortConfig} onSort={handleSort} />
       {!esVendedor && <SortableTh label="COSTO" field="costo_total" sortConfig={sortConfig} onSort={handleSort} align="right" />}
       <SortableTh label="PRECIO" field="total" sortConfig={sortConfig} onSort={handleSort} align="right" />
@@ -362,7 +413,7 @@ export default function Reportes({ usuario, config }) {
   <tbody>
     {listaAMostrar.length === 0 ? (
       <tr>
-        <td colSpan={esVendedor ? 8 : 10} style={{ textAlign: 'center', padding: 60, color: UI.pageMuted, fontWeight: 600 }}>
+        <td colSpan={esVendedor ? 9 : 11} style={{ textAlign: 'center', padding: 60, color: UI.pageMuted, fontWeight: 600 }}>
           No hay registros.
         </td>
       </tr>
@@ -370,7 +421,13 @@ export default function Reportes({ usuario, config }) {
       listaAMostrar.map(v => {
         const costo = Number(v.costo_total || 0);
         const precio = Number(v.total || 0);
-        const ganancia = precio - costo;
+        const recargaExtra = (v.venta_items || [])
+          .filter(i => !i.producto_id && i.descripcion?.startsWith('RECARGA'))
+          .reduce((s, i) => s + i.cantidad * i.precio_unitario * 0.90, 0);
+        const notaDebito = (v.venta_items || [])
+          .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
+          .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
+        const ganancia = precio - costo - recargaExtra - notaDebito;
         return (
           <tr key={v.id} style={{ background: UI.rowBg, borderBottom: `1px solid ${UI.rowBorder}` }}>
             <td style={{ padding: 14, color: UI.dateText, fontSize: 11, fontWeight: 600 }}>
@@ -388,8 +445,9 @@ export default function Reportes({ usuario, config }) {
         </td>
         <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.productos_marcas || '-'}</td>
         <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.productos_modelos || '-'}</td>
-        <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.local_nombre}</td>
-        <td style={{ padding: 14 }}><Badge color={METODO_COLOR[v.metodo_pago] || UI.pageMuted}>{v.metodo_pago.toUpperCase()}</Badge></td>
+            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.local_nombre}</td>
+            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.vendedor || '-'}</td>
+            <td style={{ padding: 14 }}><Badge color={METODO_COLOR[v.metodo_pago] || UI.pageMuted}>{v.metodo_pago.toUpperCase()}</Badge></td>
         {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: UI.pageMuted, fontSize: 11 }}>{fmt(costo)}</td>}
         <td style={{ padding: 14, textAlign: 'right', fontWeight: 800, color: UI.priceText }}>{fmt(precio)}</td>
         {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: ganancia >= 0 ? UI.profitPositive : UI.profitNegative, fontWeight: 800 }}>{fmt(ganancia)}</td>}
@@ -420,8 +478,16 @@ export default function Reportes({ usuario, config }) {
         );
       })
     )}
-  </tbody>
-</table>
+        </tbody>
+      </table>
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, width: '100%', overflowX: 'auto', paddingBottom: 4 }}>
+            <ReportStatCard label="Total Ingresos" value={fmt(totalPeriodo)} icon="cart" color={UI.statIngresos} ui={UI} />
+            <ReportStatCard label="Efectivo" value={fmt(efectivoTotal)} icon="receipt" color="#059669" ui={UI} />
+            <ReportStatCard label="Tarjeta/Transf." value={fmt(tarjetaTransferenciaTotal)} icon="transfer" color="#2563eb" ui={UI} />
+            <ReportStatCard label="Costo Total" value={fmt(costoTotalPeriodo)} icon="stock" color={UI.statOperaciones} ui={UI} />
+            <ReportStatCard label="Total Ganancia" value={fmt(gananciaTotal)} icon="reports" color={UI.statGanancia} ui={UI} />
           </div>
         </div>
       )}
@@ -464,16 +530,24 @@ export default function Reportes({ usuario, config }) {
             gap: 4
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-              <span style={{ fontSize: 13, fontWeight: 800, color: '#111827', flex: 1 }}>
-                {item.productos?.nombre || item.descripcion || "Ingreso Manual"}
-              </span>
-              <span style={{ fontSize: 13, fontWeight: 900, color: UI.primaryBtnBg }}>
+              <div style={{ flex: 1 }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: '#111827' }}>
+                  {item.productos?.nombre || item.descripcion || "Ingreso Manual"}
+                </span>
+                <div style={{ fontSize: 11, color: '#666', marginTop: 2, fontWeight: 600 }}>
+                  {item.productos?.marca || item.marca || '-'} / {item.productos?.modelo || item.modelo || '-'}
+                </div>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 900, color: UI.primaryBtnBg, whiteSpace: 'nowrap' }}>
                 {fmt(item.precio_unitario * item.cantidad)}
               </span>
             </div>
             
-            <div style={{ fontSize: 11, color: UI.pageMuted, fontWeight: 600 }}>
-              {item.cantidad} x {fmt(item.precio_unitario)}
+            <div style={{ fontSize: 11, color: UI.pageMuted, fontWeight: 600, display: 'flex', gap: 10 }}>
+              <span>{item.cantidad} x {fmt(item.precio_unitario)}</span>
+              {ventaDetalleVisible.detalle_mixto?.fechas_compra?.[item.producto_id] && (
+                <span style={{ color: '#dc2626' }}>Compra: {ventaDetalleVisible.detalle_mixto.fechas_compra[item.producto_id]}</span>
+              )}
             </div>
           </div>
         ))}
@@ -490,6 +564,28 @@ export default function Reportes({ usuario, config }) {
           <span>MÉTODO DE PAGO:</span>
           <span style={{ textTransform: 'uppercase' }}>{ventaDetalleVisible.metodo_pago}</span>
         </div>
+        {ventaDetalleVisible.metodo_pago === 'mixto' && ventaDetalleVisible.detalle_mixto && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4, padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+            {ventaDetalleVisible.detalle_mixto.efectivo > 0 && (
+              <div className="row-between" style={{ fontSize: 13, fontWeight: 600 }}>
+                <span style={{ color: '#059669' }}>Efectivo</span>
+                <span>{fmt(ventaDetalleVisible.detalle_mixto.efectivo)}</span>
+              </div>
+            )}
+            {ventaDetalleVisible.detalle_mixto.tarjeta > 0 && (
+              <div className="row-between" style={{ fontSize: 13, fontWeight: 600 }}>
+                <span style={{ color: '#2563eb' }}>Tarjeta</span>
+                <span>{fmt(ventaDetalleVisible.detalle_mixto.tarjeta)}</span>
+              </div>
+            )}
+            {ventaDetalleVisible.detalle_mixto.transferencia > 0 && (
+              <div className="row-between" style={{ fontSize: 13, fontWeight: 600 }}>
+                <span style={{ color: '#d97706' }}>Transferencia</span>
+                <span>{fmt(ventaDetalleVisible.detalle_mixto.transferencia)}</span>
+              </div>
+            )}
+          </div>
+        )}
         <div className="row-between" style={{ fontSize: 15, fontWeight: 900, marginTop: 4 }}>
           <span>TOTAL:</span>
           <span style={{ color: UI.statGanancia, fontSize: 22 }}>{fmt(ventaDetalleVisible.total)}</span>

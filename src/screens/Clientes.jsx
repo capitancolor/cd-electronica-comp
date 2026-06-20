@@ -28,7 +28,7 @@ export default function Clientes() {
   const [sortConfig, setSortConfig] = useState({ field: 'nombre', direction: 'asc' })
 
   const estadoInicial = { 
-    nombre: '', razon_social: '', cuit: '', alias: '', nro_cuenta: '', condicion_iva: 'Consumidor Final' 
+    nombre: '', razon_social: '', cuit: '', direccion: '', condicion_iva: 'Consumidor Final' 
   }
 
   const cargar = async () => {
@@ -150,7 +150,7 @@ export default function Clientes() {
               <SortableTh label="NOMBRE / CONTACTO" field="nombre" width="25%" />
               <SortableTh label="RAZÓN SOCIAL" field="razon_social" width="20%" />
               <SortableTh label="CUIT" field="cuit" width="15%" />
-              <SortableTh label="CUENTA / ALIAS" field="alias" width="20%" />
+              <SortableTh label="DIRECCIÓN" field="direccion" width="20%" />
               <SortableTh label="IVA" field="condicion_iva" width="15%" />
               <th style={{ ...styles.th, textAlign: 'center', width: '5%' }}>ACCIONES</th>
             </tr>
@@ -164,10 +164,7 @@ export default function Clientes() {
                   <td style={{ ...styles.td, fontWeight: 700 }}>{c.nombre}</td>
                   <td style={styles.td}>{c.razon_social || '-'}</td>
                   <td style={{ ...styles.td, fontFamily: 'monospace' }}>{c.cuit || '-'}</td>
-                  <td style={styles.td}>
-                    <div style={{ fontSize: 11, fontWeight: 600 }}>{c.nro_cuenta || '-'}</div>
-                    <div style={{ color: UI.accent, fontSize: 11 }}>{c.alias || '-'}</div>
-                  </td>
+                  <td style={styles.td}>{c.direccion || '-'}</td>
                   <td style={styles.td}>{c.condicion_iva}</td>
                   <td style={{ ...styles.td, textAlign: 'center' }}>
                     <div style={{ display: 'flex', justifyContent: 'center', gap: 5 }}>
@@ -221,23 +218,13 @@ export default function Clientes() {
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
-                <div>
-                  <label style={styles.label}>CBU / Nro Cuenta</label>
-                  <input 
-                    style={styles.modalInput} 
-                    value={modal.data.nro_cuenta} 
-                    onChange={e => setModal({...modal, data: {...modal.data, nro_cuenta: e.target.value}})}
-                  />
-                </div>
-                <div>
-                  <label style={styles.label}>Alias de Pago</label>
-                  <input 
-                    style={{...styles.modalInput, color: UI.accent}} 
-                    value={modal.data.alias} 
-                    onChange={e => setModal({...modal, data: {...modal.data, alias: e.target.value}})}
-                  />
-                </div>
+              <div>
+                <label style={styles.label}>Dirección</label>
+                <input 
+                  style={styles.modalInput} 
+                  value={modal.data.direccion} 
+                  onChange={e => setModal({...modal, data: {...modal.data, direccion: e.target.value}})}
+                />
               </div>
 
               <div>

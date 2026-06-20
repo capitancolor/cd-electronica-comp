@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Database from '@tauri-apps/plugin-sql' // <-- IMPORTANTE: Agregar esto
 import { supabase } from '../supabase' // Lo dejamos por si getResumenHoy lo necesita internamente
-import { registrarVenta, registrarNotaCredito, getVentaDetalle, getResumenHoy } from '../services/negocio'
+import { registrarVenta, registrarNotaCredito, getVentaDetalle, getResumenHoy, getReparacionesSinCobrar, registrarPagoReparacion } from '../services/negocio'
 import { exportarVentaPDF, exportarNotaCreditoPDF } from '../services/exportPdf'
 import { Icon, toast } from '../components/UI'
 import { saveLocalConfig } from '../services/config'
@@ -11,7 +11,8 @@ const stylesLocalBtn = {
   borderRadius: 10, border: '2px solid #ccc', cursor: 'pointer', fontSize: 14, textAlign: 'left'
 }
 
-const fmt = v => '$' + Number(v).toLocaleString('es-AR', { maximumFractionDigits: 0 })
+const fmt = v => '$' + Number(v).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const parsePrecio = (val) => { if (!val) return NaN; return parseFloat(String(val).replace(/\./g, '').replace(',', '.')) }
 
 const METODOS = [
   { value: 'efectivo', label: '💵 Efectivo' },
@@ -107,12 +108,27 @@ const [filtroModelo, setFiltroModelo] = useState('')
   const [manualData, setManualData] = useState({ concepto: '', precio: '' })
   const [mixtoData, setMixtoData] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
 
+  const [showRecargaModal, setShowRecargaModal] = useState(false)
+  const [recargaMonto, setRecargaMonto] = useState('')
+
+  const [showNdModal, setShowNdModal] = useState(false)
+  const [ndData, setNdData] = useState({ concepto: '', monto: '' })
+
+  const [showRepModal, setShowRepModal] = useState(false)
+  const [repBusqueda, setRepBusqueda] = useState('')
+  const [repResultados, setRepResultados] = useState([])
+  const [repSeleccionada, setRepSeleccionada] = useState(null)
+  const [metodoPagoRep, setMetodoPagoRep] = useState('efectivo')
+  const [cobrandoRep, setCobrandoRep] = useState(false)
+
   const [showNcModal, setShowNcModal] = useState(false)
   const [ncCarrito, setNcCarrito] = useState([])
   const [ncBusqueda, setNcBusqueda] = useState('')
   const [ncResultados, setNcResultados] = useState([])
   const [ncMotivo, setNcMotivo] = useState('')
   const ncTimer = useRef(null)
+  const precioRef = useRef(null)
+  const recargaRef = useRef(null)
 
   const [carrito, setCarrito] = useState(() => {
     const userId = usuario?.id || 'anon'
@@ -184,8 +200,22 @@ const cargarListasBase = async () => {
     localStorage.setItem(`carrito_${userId}`, JSON.stringify(carrito))
   }, [carrito, usuario?.id])
 
+  // Búsqueda de reparaciones para cobrar
   useEffect(() => {
-    if (!showNcModal) return
+    if (!showRepModal) return;
+    const t = setTimeout(async () => {
+      try {
+        const data = await getReparacionesSinCobrar(repBusqueda);
+        setRepResultados(data || []);
+      } catch (e) {
+        console.error("Error buscando reparaciones:", e);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [repBusqueda, showRepModal]);
+
+  useEffect(() => {
+    if (!showNcModal) return;
     const q = ncBusqueda.trim()
     clearTimeout(ncTimer.current)
     ncTimer.current = setTimeout(async () => {
@@ -340,6 +370,7 @@ const cargarListasBase = async () => {
       precio_unitario: precioFinal, 
       cantidad: 1,
       esManual: prod.esManual || false,
+      esRecarga: prod.esRecarga || false,
       stockDisponible: prod.stockActual,
       precio_costo: parseFloat(prod.precio_costo) || 0
     }];
@@ -354,14 +385,17 @@ function agregarANC(prod) {
       return prev.map((i, j) => j === idx ? { ...i, cantidad: i.cantidad + 1 } : i)
     }
     const precio = parseFloat(prod.precio_venta) || 0
+    const costo = parseFloat(prod.precio_costo) || 0
     return [...prev, {
       producto_id: prod.id,
       nombre: prod.nombre,
       marca: prod.marca || '',
       modelo: prod.modelo || '',
       precio_unitario: precio,
+      precio_costo: costo,
       cantidad: 1,
-      esManual: false
+      esManual: false,
+      fecha_compra: ''
     }]
   })
 }
@@ -384,7 +418,9 @@ async function confirmarNotaCredito() {
         marca: item.marca,
         modelo: item.modelo,
         precio_unitario: item.precio_unitario,
-        cantidad: item.cantidad
+        precio_costo: item.precio_costo || 0,
+        cantidad: item.cantidad,
+        fecha_compra: item.fecha_compra || null
       })),
       motivo: ncMotivo.trim()
     })
@@ -425,6 +461,8 @@ async function confirmarVentaFinal() {
           precio_unitario: item.precio_unitario, 
           cantidad: item.cantidad,
           es_manual: item.esManual || false,
+          es_recarga: item.esRecarga || false,
+          es_nota_debito: item.esNotaDebito || false,
           precio_costo: item.precio_costo || 0
         })),
         metodoPago: metodo, 
@@ -465,7 +503,101 @@ async function confirmarVentaFinal() {
       toast('Error al guardar config', 'error')
     }
   }
-  
+
+  const handlePrecioChange = (e) => {
+    const input = e.target;
+    const cursorPos = input.selectionStart;
+    const raw = e.target.value;
+
+    const rawBefore = raw.slice(0, cursorPos).replace(/[^\d,\-]/g, '');
+    const relevantLen = rawBefore.length;
+
+    let cleaned = raw.replace(/[^\d,\-]/g, '');
+    const isNegative = cleaned.startsWith('-') ? '-' : '';
+    if (isNegative) cleaned = cleaned.slice(1);
+
+    const commaIdx = cleaned.indexOf(',');
+    let intPart = cleaned;
+    let decPart = '';
+    if (commaIdx !== -1) {
+      intPart = cleaned.slice(0, commaIdx);
+      decPart = cleaned.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2);
+    }
+
+    const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    let result = isNegative + formattedInt;
+    if (commaIdx !== -1 || raw.endsWith(',')) {
+      result += ',' + decPart;
+    }
+
+    let newCursor = result.length;
+    if (relevantLen === 0) {
+      newCursor = 0;
+    } else {
+      let count = 0;
+      for (let i = 0; i < result.length; i++) {
+        if (/[\d,\-]/.test(result[i])) count++;
+        if (count >= relevantLen) { newCursor = i + 1; break; }
+      }
+    }
+
+    if (result !== manualData.precio) {
+      setManualData({...manualData, precio: result});
+    }
+    requestAnimationFrame(() => {
+      if (input === document.activeElement) {
+        input.selectionStart = input.selectionEnd = newCursor;
+      }
+    });
+  };
+
+  const handleRecargaMontoChange = (e) => {
+    const input = e.target;
+    const cursorPos = input.selectionStart;
+    const raw = e.target.value;
+
+    const rawBefore = raw.slice(0, cursorPos).replace(/[^\d,\-]/g, '');
+    const relevantLen = rawBefore.length;
+
+    let cleaned = raw.replace(/[^\d,\-]/g, '');
+    const isNegative = cleaned.startsWith('-') ? '-' : '';
+    if (isNegative) cleaned = cleaned.slice(1);
+
+    const commaIdx = cleaned.indexOf(',');
+    let intPart = cleaned;
+    let decPart = '';
+    if (commaIdx !== -1) {
+      intPart = cleaned.slice(0, commaIdx);
+      decPart = cleaned.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2);
+    }
+
+    const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    let result = isNegative + formattedInt;
+    if (commaIdx !== -1 || raw.endsWith(',')) {
+      result += ',' + decPart;
+    }
+
+    let newCursor = result.length;
+    if (relevantLen === 0) {
+      newCursor = 0;
+    } else {
+      let count = 0;
+      for (let i = 0; i < result.length; i++) {
+        if (/[\d,\-]/.test(result[i])) count++;
+        if (count >= relevantLen) { newCursor = i + 1; break; }
+      }
+    }
+
+    if (result !== recargaMonto) {
+      setRecargaMonto(result);
+    }
+    requestAnimationFrame(() => {
+      if (input === document.activeElement) {
+        input.selectionStart = input.selectionEnd = newCursor;
+      }
+    });
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 16, background: UI.pageBg, color: UI.pageText, padding: 12, borderRadius: 12, position: 'relative' }}>
       <style>{`
@@ -474,9 +606,9 @@ async function confirmarVentaFinal() {
         .remito-table td { padding: 12px; border-bottom: 1px solid ${UI.cartRowBorder}; }
         .busqueda-flotante {
           position: absolute;
-          top: 180px; /* Ajustado debajo del buscador */
-          left: 12px;
-          right: 12px;
+          top: calc(100% + 4px);
+          left: 0;
+          right: 0;
           z-index: 50;
           background: ${UI.resultsWrapBg};
           border: 1px solid ${UI.resultsWrapBorder};
@@ -522,18 +654,6 @@ async function confirmarVentaFinal() {
           <option value="">Categorías</option>
           {categorias.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
         </select>
-        <button onClick={() => setShowManualModal(true)} style={{ height: 56, padding: '0 20px', borderRadius: 12, border: '2px solid #000', background: '#fff', fontWeight: 800, cursor: 'pointer' }}>
-          + INGRESO MANUAL
-        </button>
-        <button onClick={() => {
-          setNcBusqueda('')
-          setNcCarrito([])
-          setNcMotivo('')
-          setNcResultados([])
-          setShowNcModal(true)
-        }} style={{ height: 56, padding: '0 20px', borderRadius: 12, border: '2px solid #dc2626', background: '#fff', color: '#dc2626', fontWeight: 800, cursor: 'pointer' }}>
-          NOTA DE CRÉDITO
-        </button>
 
         {/* LISTA DE RESULTADOS FLOTANTE (Solo aparece al buscar) */}
         {busqueda.trim().length > 0 && (
@@ -544,11 +664,11 @@ async function confirmarVentaFinal() {
       borderBottom: `2px solid ${UI.resultsWrapBorder}`, fontSize: 11, 
       fontWeight: 800, color: '#64748b', textTransform: 'uppercase' 
     }}>
-      <div style={{ flex: 2 }}>Producto</div>
-      <div style={{ width: 120 }}>Marca</div>
-      <div style={{ width: 120 }}>Modelo</div>
-      <div style={{ width: 100, textAlign: 'right' }}>Precio</div>
-      <div style={{ width: 60 }}></div>
+      <div style={{ flex: 3 }}>Producto</div>
+      <div style={{ flex: 2 }}>Marca</div>
+      <div style={{ flex: 2 }}>Modelo</div>
+      <div style={{ flex: 2, textAlign: 'right' }}>Precio</div>
+      <div style={{ width: 50 }}></div>
     </div>
 
     {resultados.length === 0 ? (
@@ -576,17 +696,17 @@ async function confirmarVentaFinal() {
             </div>
 
             {/* MARCA */}
-            <div style={{ width: 120, fontSize: 13, color: UI.subtitle, fontWeight: 600 }}>
+            <div style={{ flex: 2, fontSize: 13, color: UI.subtitle, fontWeight: 600 }}>
               {p.marca || '-'}
             </div>
 
             {/* MODELO */}
-            <div style={{ width: 120, fontSize: 13, color: UI.subtitle, fontWeight: 600 }}>
+            <div style={{ flex: 2, fontSize: 13, color: UI.subtitle, fontWeight: 600 }}>
               {p.modelo || '-'}
             </div>
 
             {/* PRECIO Y STOCK */}
-            <div style={{ width: 100, textAlign: 'right' }}>
+            <div style={{ flex: 2, textAlign: 'right' }}>
               {p.en_promo && p.precio_promo ? (
                 <>
                   <div style={{ fontSize: 10, color: '#9ca3af', textDecoration: 'line-through' }}>{fmt(p.precio_venta)}</div>
@@ -690,7 +810,9 @@ async function confirmarVentaFinal() {
 
                 <td style={{ fontWeight: 800, fontSize: 15 }}>
                   {item.nombre}
-                  {item.esManual && <span style={{ marginLeft: 8, fontSize: 9, background: '#fee2e2', color: '#dc2626', padding: '2px 4px', borderRadius: 4 }}>MANUAL</span>}
+                  {item.esNotaDebito && <span style={{ marginLeft: 8, fontSize: 9, background: '#fef3c7', color: '#f59e0b', padding: '2px 4px', borderRadius: 4 }}>ND</span>}
+                  {item.esRecarga && <span style={{ marginLeft: 8, fontSize: 9, background: '#dcfce7', color: '#16a34a', padding: '2px 4px', borderRadius: 4 }}>RECARGA</span>}
+                  {item.esManual && !item.esRecarga && !item.esNotaDebito && <span style={{ marginLeft: 8, fontSize: 9, background: '#fee2e2', color: '#dc2626', padding: '2px 4px', borderRadius: 4 }}>MANUAL</span>}
                 </td>
                 
                 <td style={{ color: UI.subtitle, fontWeight: 600, fontSize: 13 }}>{item.marca || '-'}</td>
@@ -756,6 +878,36 @@ async function confirmarVentaFinal() {
           </VentaButton>
         </div>
       </div>
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+        <button onClick={() => { setNdData({ concepto: '', monto: '' }); setShowNdModal(true); }} style={{ flex: 1, height: 48, borderRadius: 12, border: '1px solid #f59e0b', background: '#fffbeb', color: '#92400e', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>
+          NOTA DE DÉBITO
+        </button>
+        <button onClick={() => {
+          setNcBusqueda('')
+          setNcCarrito([])
+          setNcMotivo('')
+          setNcResultados([])
+          setShowNcModal(true)
+        }} style={{ flex: 1, height: 48, borderRadius: 12, border: '1px solid #fca5a5', background: '#fef2f2', color: '#991b1b', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>
+          NOTA DE CRÉDITO
+        </button>
+        <button onClick={() => setShowRecargaModal(true)} style={{ flex: 1, height: 48, borderRadius: 12, border: '1px solid #86efac', background: '#f0fdf4', color: '#166534', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>
+          + RECARGA
+        </button>
+        <button onClick={() => {
+          setRepBusqueda('')
+          setRepResultados([])
+          setRepSeleccionada(null)
+          setMetodoPagoRep('efectivo')
+          setShowRepModal(true)
+        }} style={{ flex: 1, height: 48, borderRadius: 12, border: '1px solid #93c5fd', background: '#eff6ff', color: '#1e40af', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>
+          COBRAR REPARACIÓN
+        </button>
+        <button onClick={() => setShowManualModal(true)} style={{ flex: 1, height: 48, borderRadius: 12, border: '1px solid #cbd5e1', background: '#f8fafc', color: '#334155', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>
+          + INGRESO MANUAL
+        </button>
+      </div>
       {showManualModal && (
   <VentaModal title="Ajuste / Ingreso Manual" onClose={() => setShowManualModal(false)} ui={UI}>
     <div className="col" style={{ gap: 15 }}>
@@ -768,22 +920,23 @@ async function confirmarVentaFinal() {
       />
       <div style={{ fontSize: 13, color: '#666', marginBottom: -10 }}>Monto</div>
       <input 
+        ref={precioRef}
         type="text" 
-        inputMode="numeric"
-        value={manualData.precio !== '' && !isNaN(Number(manualData.precio)) ? Number(manualData.precio).toLocaleString('es-AR') : manualData.precio} 
-        onChange={e => setManualData({...manualData, precio: e.target.value.replace(/[^\d-]/g, '')})}  
-        placeholder="0.00"
+        inputMode="decimal"
+        value={manualData.precio}
+        onChange={handlePrecioChange}
+        placeholder="0,00"
         style={{ 
           height: 44, 
           padding: '0 12px', 
           borderRadius: 8, 
           border: '1px solid #ccc',
           fontWeight: '800',
-          color: Number(manualData.precio) < 0 ? '#dc2626' : '#16a34a'
+          color: parsePrecio(manualData.precio) < 0 ? '#dc2626' : '#16a34a'
         }} 
       /><VentaButton ui={UI} onClick={() => {
         const conceptoOk = manualData.concepto && manualData.concepto.trim() !== '';
-        const precioOk = manualData.precio !== '' && !isNaN(manualData.precio);
+        const precioOk = manualData.precio !== '' && !isNaN(parsePrecio(manualData.precio));
 
         if (!conceptoOk || !precioOk) {
           return toast('Por favor, ingresa descripción y monto', 'error');
@@ -793,7 +946,7 @@ async function confirmarVentaFinal() {
         const nuevoAjuste = { 
           id: `MANUAL-${Date.now()}`, 
   nombre: manualData.concepto.trim().toUpperCase(), 
-  precio_venta: Number(manualData.precio), // registrarVenta usa precio_unitario, ojo ahí
+  precio_venta: parsePrecio(manualData.precio), // registrarVenta usa precio_unitario, ojo ahí
   stockActual: 9999,
   esManual: true
         };
@@ -806,6 +959,87 @@ async function confirmarVentaFinal() {
 }}>
   AGREGAR AJUSTE
 </VentaButton>
+    </div>
+  </VentaModal>
+)}
+
+      {showRecargaModal && (
+  <VentaModal title="Recarga" onClose={() => setShowRecargaModal(false)} ui={UI}>
+    <div className="col" style={{ gap: 15 }}>
+      <div style={{ fontSize: 13, color: '#666' }}>Monto de la recarga</div>
+      <input 
+        ref={recargaRef}
+        type="text" 
+        inputMode="decimal"
+        value={recargaMonto}
+        onChange={handleRecargaMontoChange}
+        placeholder="0,00"
+        style={{ height: 44, padding: '0 12px', borderRadius: 8, border: '1px solid #ccc', fontWeight: '800', fontSize: 18 }}
+      />
+      <VentaButton ui={UI} onClick={() => {
+        const monto = parsePrecio(recargaMonto);
+        if (isNaN(monto) || monto <= 0) return toast('Ingresa un monto válido', 'error');
+
+        const item = {
+          id: `RECARGA-${Date.now()}`,
+          nombre: `RECARGA $${monto.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
+          precio_venta: monto,
+          precio_costo: 0,
+          stockActual: 9999,
+          esRecarga: true,
+          esManual: true,
+        };
+        agregarAlCarrito(item);
+        setShowRecargaModal(false);
+        setRecargaMonto('');
+      }}>
+        AGREGAR RECARGA
+      </VentaButton>
+    </div>
+  </VentaModal>
+)}
+
+      {showNdModal && (
+  <VentaModal title="Nota de Débito" onClose={() => setShowNdModal(false)} ui={UI}>
+    <div className="col" style={{ gap: 15 }}>
+      <div style={{ fontSize: 13, color: '#666', marginBottom: -10 }}>Concepto</div>
+      <input
+        value={ndData.concepto}
+        onChange={e => setNdData({...ndData, concepto: e.target.value})}
+        placeholder="Ej: Ajuste de caja, depósito, etc."
+        style={{ height: 44, padding: '0 12px', borderRadius: 8, border: '1px solid #ccc', fontWeight: '600' }}
+      />
+      <div style={{ fontSize: 13, color: '#666', marginBottom: -10 }}>Monto</div>
+      <input
+        type="text" inputMode="decimal"
+        value={ndData.monto}
+        onChange={e => {
+          const raw = e.target.value.replace(/[^\d,]/g, '');
+          setNdData({...ndData, monto: raw});
+        }}
+        placeholder="0,00"
+        style={{ height: 44, padding: '0 12px', borderRadius: 8, border: '1px solid #ccc', fontWeight: '800', fontSize: 18 }}
+      />
+      <VentaButton ui={UI} onClick={() => {
+        const monto = parsePrecio(ndData.monto);
+        if (!ndData.concepto.trim()) return toast('Ingresá un concepto', 'error');
+        if (isNaN(monto) || monto <= 0) return toast('Ingresá un monto válido', 'error');
+
+        const item = {
+          id: `ND-${Date.now()}`,
+          nombre: `NOTA DE DÉBITO: ${ndData.concepto.trim()} $${monto.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
+          precio_venta: monto,
+          precio_costo: 0,
+          stockActual: 9999,
+          esNotaDebito: true,
+          esManual: true,
+        };
+        agregarAlCarrito(item);
+        setShowNdModal(false);
+        setNdData({ concepto: '', monto: '' });
+      }}>
+        AGREGAR NOTA DE DÉBITO
+      </VentaButton>
     </div>
   </VentaModal>
 )}
@@ -828,6 +1062,37 @@ async function confirmarVentaFinal() {
                 </div>
               </div>
             )}
+            <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 10, fontSize: 14 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f3f4f6', fontWeight: 800, fontSize: 12, color: '#374151', textTransform: 'uppercase' }}>
+                    <th style={{ padding: '10px 12px', textAlign: 'left' }}>Producto</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'left' }}>Marca</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'left' }}>Modelo</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'center' }}>Cant</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>P.Unit</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Subt.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {carrito.map((item, i) => (
+                    <tr key={i} style={{ borderTop: '1px solid #e5e7eb' }}>
+                      <td style={{ padding: '10px 12px', fontWeight: 700 }}>
+                        {item.nombre}
+                        {item.esNotaDebito && <span style={{ marginLeft: 6, fontSize: 10, background: '#fef3c7', color: '#f59e0b', padding: '2px 6px', borderRadius: 4 }}>ND</span>}
+                        {item.esRecarga && <span style={{ marginLeft: 6, fontSize: 10, background: '#dcfce7', color: '#16a34a', padding: '2px 6px', borderRadius: 4 }}>REC</span>}
+                        {item.esManual && !item.esRecarga && !item.esNotaDebito && <span style={{ marginLeft: 6, fontSize: 10, background: '#fee2e2', color: '#dc2626', padding: '2px 6px', borderRadius: 4 }}>MAN</span>}
+                      </td>
+                      <td style={{ padding: '10px 12px', color: '#6b7280', fontWeight: 500 }}>{item.marca || '-'}</td>
+                      <td style={{ padding: '10px 12px', color: '#6b7280', fontWeight: 500 }}>{item.modelo || '-'}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 800 }}>{item.cantidad}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 600 }}>{fmt(item.precio_unitario)}</td>
+                      <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 800 }}>{fmt(item.cantidad * item.precio_unitario)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
             <div className="row-between"><span>Subtotal:</span> <b>{fmt(subtotalCarrito)}</b></div>
             {recargoTarjeta > 0 && <div className="row-between" style={{ color: 'red' }}><span>Recargo Tarjeta:</span> <b>+{fmt(recargoTarjeta)}</b></div>}
             <div className="row-between" style={{ fontSize: 24, fontWeight: 900 }}><span>TOTAL:</span> <span style={{ color: UI.totalValue }}>{fmt(totalFinal)}</span></div>
@@ -933,8 +1198,8 @@ async function confirmarVentaFinal() {
                 <div style={{ fontSize: 14, fontWeight: 800, color: '#dc2626', marginTop: 4 }}>
                   Productos a devolver ({ncCarrito.length})
                 </div>
-                <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 650 }}>
                     <thead>
                       <tr style={{ background: '#fef2f2' }}>
                         <th style={{ padding: '8px 10px', textAlign: 'left' }}>Producto</th>
@@ -943,6 +1208,7 @@ async function confirmarVentaFinal() {
                         <th style={{ padding: '8px 10px', textAlign: 'center', width: 80 }}>Cant.</th>
                         <th style={{ padding: '8px 10px', textAlign: 'right', width: 90 }}>P.Unit</th>
                         <th style={{ padding: '8px 10px', textAlign: 'right', width: 90 }}>Subtotal</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center', width: 110 }}>F.Compra</th>
                         <th style={{ padding: '8px 10px', textAlign: 'center', width: 40 }}></th>
                       </tr>
                     </thead>
@@ -968,6 +1234,10 @@ async function confirmarVentaFinal() {
                           <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600 }}>{fmt(item.precio_unitario)}</td>
                           <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#dc2626' }}>
                             -{fmt(item.cantidad * item.precio_unitario)}
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            <input type="date" value={item.fecha_compra || ''} onChange={e => setNcCarrito(c => c.map((x, j) => j === i ? { ...x, fecha_compra: e.target.value } : x))}
+                              style={{ width: 110, fontSize: 11, padding: '3px 4px', border: '1px solid #ccc', borderRadius: 4, textAlign: 'center' }} />
                           </td>
                           <td style={{ padding: '8px 10px', textAlign: 'center' }}>
                             <button onClick={() => setNcCarrito(c => c.filter((_, j) => j !== i))}
@@ -1060,11 +1330,135 @@ async function confirmarVentaFinal() {
         </VentaModal>
       )}
 
+      {showRepModal && (
+        <VentaModal title="Cobrar Reparación" onClose={() => !cobrandoRep && setShowRepModal(false)} width={600} ui={UI}>
+          <div className="col" style={{ gap: 12 }}>
+            {cobrandoRep && (
+              <div style={{ position: 'absolute', inset: -24, background: 'rgba(255,255,255,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 14, zIndex: 10, backdropFilter: 'blur(2px)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#fff', padding: '16px 24px', borderRadius: 12, boxShadow: '0 4px 16px rgba(0,0,0,0.12)', fontWeight: 800, fontSize: 16 }}>
+                  <span style={{ fontSize: 22 }}>⏳</span> PROCESANDO COBRO...
+                </div>
+              </div>
+            )}
+
+            <input
+              value={repBusqueda}
+              onChange={e => { setRepBusqueda(e.target.value); setRepSeleccionada(null); }}
+              placeholder="🔍 Buscar reparación por cliente o equipo..."
+              style={{ height: 44, borderRadius: 8, border: '2px solid #2563eb', padding: '0 12px', fontSize: 15, fontWeight: 600 }}
+            />
+
+            {!repSeleccionada && repResultados.length > 0 && (
+              <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, maxHeight: 250, overflowY: 'auto', background: '#fff' }}>
+                <div style={{ display: 'flex', padding: '8px 12px', background: '#f8fafc', fontSize: 11, fontWeight: 800, color: '#64748b', textTransform: 'uppercase', borderBottom: '1px solid #e5e7eb' }}>
+                  <div style={{ flex: 2 }}>Cliente</div>
+                  <div style={{ flex: 2 }}>Equipo</div>
+                  <div style={{ flex: 1 }}>Total</div>
+                  <div style={{ flex: 1 }}>Estado</div>
+                </div>
+                {repResultados.map(r => (
+                  <div key={r.id} onClick={() => setRepSeleccionada(r)}
+                    style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer', transition: 'background 0.2s' }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#eff6ff'}
+                    onMouseLeave={e => e.currentTarget.style.background = '#fff'}
+                  >
+                    <div style={{ flex: 2, fontWeight: 700, fontSize: 14 }}>{r.cliente}</div>
+                    <div style={{ flex: 2, fontSize: 13, color: '#666' }}>{r.equipo}</div>
+                    <div style={{ flex: 1, fontWeight: 800, fontSize: 14, color: '#16a34a' }}>
+                      ${Number(r.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                    <div style={{ flex: 1, fontSize: 12, fontWeight: 700, color: r.estado === 'Completado' ? '#d97706' : '#2563eb' }}>{r.estado}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!repSeleccionada && repBusqueda.trim() && repResultados.length === 0 && (
+              <div style={{ padding: 20, textAlign: 'center', color: '#999', fontSize: 13 }}>No se encontraron reparaciones pendientes de cobro</div>
+            )}
+
+            {repSeleccionada && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button onClick={() => setRepSeleccionada(null)} style={{ background: 'none', border: 'none', color: '#2563eb', cursor: 'pointer', fontWeight: 700, fontSize: 12 }}>CAMBIAR REPARACIÓN</button>
+                </div>
+
+                <div style={{ background: '#f0fdf4', padding: 15, borderRadius: 10, border: '1px solid #bbf7d0' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 14 }}>
+                    <div><span style={{ fontWeight: 700, color: '#666' }}>Cliente:</span> <b>{repSeleccionada.cliente}</b></div>
+                    <div><span style={{ fontWeight: 700, color: '#666' }}>Equipo:</span> <b>{repSeleccionada.equipo}</b></div>
+                    <div><span style={{ fontWeight: 700, color: '#666' }}>Marca:</span> <b>{repSeleccionada.marca || '-'}</b></div>
+                    <div><span style={{ fontWeight: 700, color: '#666' }}>Modelo:</span> <b>{repSeleccionada.modelo || '-'}</b></div>
+                    <div><span style={{ fontWeight: 700, color: '#666' }}>Estado:</span> <b>{repSeleccionada.estado}</b></div>
+                    <div><span style={{ fontWeight: 700, color: '#666' }}>Técnico:</span> <b>{repSeleccionada.tecnico_id || '-'}</b></div>
+                  </div>
+                </div>
+
+                {repSeleccionada.repuestos && repSeleccionada.repuestos.length > 0 && (
+                  <div style={{ background: '#fffbeb', padding: 12, borderRadius: 10, border: '1px solid #fde68a' }}>
+                    <div style={{ fontWeight: 800, fontSize: 12, color: '#92400e', marginBottom: 6 }}>⚠️ REPUESTOS A DESCONTAR DEL STOCK:</div>
+                    {repSeleccionada.repuestos.map((r, i) => (
+                      <div key={r.producto_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
+                        <span>{r.nombre}</span>
+                        <span style={{ fontWeight: 800 }}>x{r.cantidad}</span>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 11, color: '#92400e', marginTop: 4 }}>
+                      * Se descuentan a $0 (incluidos en el total)
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb', padding: 15, borderRadius: 10 }}>
+                  <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>TOTAL:</span>
+                  <span style={{ fontWeight: 900, fontSize: 28, color: '#16a34a' }}>
+                    ${Number(repSeleccionada.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 700, color: '#666', marginBottom: 5, display: 'block' }}>MÉTODO DE PAGO</label>
+                  <select value={metodoPagoRep} onChange={e => setMetodoPagoRep(e.target.value)} style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 700 }}>
+                    <option value="efectivo">💵 Efectivo</option>
+                    <option value="tarjeta">💳 Tarjeta (+10%)</option>
+                    <option value="transferencia">🏦 Transferencia</option>
+                  </select>
+                </div>
+
+                <VentaButton ui={UI} onClick={async () => {
+                  setCobrandoRep(true);
+                  try {
+                    const res = await registrarPagoReparacion({
+                      reparacionId: repSeleccionada.id,
+                      localId: config.local_id,
+                      usuarioId: usuario.id,
+                      metodoPago: metodoPagoRep
+                    });
+                    setTicketModal({ total: repSeleccionada.total });
+                    setShowRepModal(false);
+                    setRepSeleccionada(null);
+                    setRepBusqueda('');
+                    setRepResultados([]);
+                    actualizarResumen();
+                  } catch (err) {
+                    toast(err.message, 'error');
+                  } finally {
+                    setCobrandoRep(false);
+                  }
+                }} disabled={cobrandoRep} style={{ background: '#2563eb', borderColor: '#2563eb' }}>
+                  {cobrandoRep ? '⏳ COBRANDO...' : `COBRAR ${Number(repSeleccionada.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                </VentaButton>
+              </div>
+            )}
+          </div>
+        </VentaModal>
+      )}
+
       {ticketModal && (
         <VentaModal title={ticketModal.esNotaCredito ? 'Nota de Crédito Exitosa' : 'Venta Exitosa'} onClose={() => setTicketModal(null)} ui={UI}>
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
             <div style={{ fontSize: ticketModal.esNotaCredito ? 24 : 32, fontWeight: 900, color: ticketModal.esNotaCredito ? '#dc2626' : UI.ticketAmount }}>
-              {ticketModal.esNotaCredito ? `-$${Math.abs(ticketModal.total).toLocaleString('es-AR')}` : fmt(ticketModal?.total || 0)}
+              {ticketModal.esNotaCredito ? `-$${Math.abs(ticketModal.total).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : fmt(ticketModal?.total || 0)}
             </div>
             {ticketModal.esNotaCredito && <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>Stock restaurado correctamente</div>}
           </div>

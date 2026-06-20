@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
-import { getReparaciones, guardarReparacion, eliminarReparacion, getTecnicos } from '../services/negocio'
-import { Icon, toast } from '../components/UI'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { getReparaciones, guardarReparacion, eliminarReparacion, getTecnicos, registrarPagoReparacion } from '../services/negocio'
+import { Icon, toast, ConfirmDialog } from '../components/UI'
 import { supabase } from '../supabase'
 import Database from '@tauri-apps/plugin-sql'
 import Tecnicos from './Tecnicos'
@@ -13,9 +13,9 @@ const UI = {
   title: '#111827'
 }
 
-const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR')
+const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-export default function Reparaciones() {
+export default function Reparaciones({ usuario, config }) {
   const [items, setItems] = useState([])
   const [busqueda, setBusqueda] = useState('')
   const [loading, setLoading] = useState(false)
@@ -23,6 +23,14 @@ export default function Reparaciones() {
   const [sortConfig, setSortConfig] = useState({ field: 'fecha', direction: 'desc' })
   const [showTecnicos, setShowTecnicos] = useState(false)
   const [tecnicosList, setTecnicosList] = useState([])
+  const [confirmDelete, setConfirmDelete] = useState(null)
+  const [repuestoBusqueda, setRepuestoBusqueda] = useState('')
+  const [repuestoResultados, setRepuestoResultados] = useState([])
+  const [showCobrarModal, setShowCobrarModal] = useState(false)
+  const [cobrarReparacion, setCobrarReparacion] = useState(null)
+  const [metodoPagoCobro, setMetodoPagoCobro] = useState('efectivo')
+  const [cobrando, setCobrando] = useState(false)
+  const priceRef = useRef(null)
 
   useEffect(() => {
     getTecnicos().then(setTecnicosList).catch(() => {})
@@ -31,7 +39,8 @@ export default function Reparaciones() {
   const estadoInicial = { 
     fecha: new Date().toISOString().split('T')[0],
     cliente: '', telefono: '', equipo: '', marca: '', modelo: '', 
-    problema: '', arreglo: '', accesorios: '', service: false, total: 0, estado: 'Pendiente', tecnico_id: null
+    problema: '', arreglo: '', accesorios: '', service: false, precio: '', costo: '', estado: 'En Progreso', tecnico_id: null,
+    repuestos: []
   }
 
   const cargar = async () => {
@@ -42,6 +51,31 @@ export default function Reparaciones() {
   }
 
   useEffect(() => { cargar() }, [busqueda])
+
+  // Búsqueda de productos para repuestos
+  useEffect(() => {
+    if (!modal.show) return;
+    const q = repuestoBusqueda.trim();
+    if (!q) { setRepuestoResultados([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const db = await Database.load("sqlite:cd_electronica.db");
+        const palabras = q.split(/\s+/).filter(Boolean);
+        const condiciones = palabras.map(() => "(nombre LIKE ? OR marca LIKE ? OR modelo LIKE ?)");
+        const params = [];
+        for (const pal of palabras) {
+          const term = `%${pal}%`;
+          params.push(term, term, term);
+        }
+        const data = await db.select(
+          `SELECT * FROM productos WHERE activo = 1 AND (${condiciones.join(" AND ")}) LIMIT 20`,
+          params
+        );
+        setRepuestoResultados(data || []);
+      } catch (e) { console.error("Error buscando repuestos:", e); }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [repuestoBusqueda, modal.show]);
 
   // Realtime: escuchar cambios en reparaciones (otras terminales)
   useEffect(() => {
@@ -83,6 +117,8 @@ export default function Reparaciones() {
 
   const abrirModal = (reparacion = null) => {
     const data = reparacion ? { ...reparacion } : { ...estadoInicial }
+    setRepuestoBusqueda('');
+    setRepuestoResultados([]);
     if (reparacion && reparacion.problema) {
       const p = reparacion.problema
       const mm = p.match(/^MARCA\/MODELO:\s*(.*?)\s*$/m)
@@ -96,6 +132,12 @@ export default function Reparaciones() {
         data.accesorios = ac ? ac[1].trim() : ''
         data.arreglo = tr ? tr[1].trim() : ''
       }
+    }
+    if (typeof data.precio === 'number' && !isNaN(data.precio)) {
+      data.precio = data.precio > 0 ? data.precio.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
+    }
+    if (typeof data.costo === 'number' && !isNaN(data.costo)) {
+      data.costo = data.costo > 0 ? data.costo.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
     }
     setModal({ show: true, data })
   }
@@ -120,12 +162,85 @@ export default function Reparaciones() {
     }
   };
 
-  const handleEliminar = async (id, cliente) => {
-    alert(`ATENCIÓN: Vas a eliminar la orden de "${cliente}". Esta acción no se puede deshacer.`);
-    if (!window.confirm(`¿Confirmas eliminar la orden de "${cliente}"?`)) return
-    try { await eliminarReparacion(id); cargar(); toast("Eliminado") } 
-    catch (err) { toast("Error", "error") }
+  const handleEliminar = async () => {
+    if (!confirmDelete) return
+    try { await eliminarReparacion(confirmDelete.id); cargar(); toast("Eliminado"); setConfirmDelete(null) } 
+    catch (err) { toast("Error", "error"); setConfirmDelete(null) }
   }
+
+  const confirmarEliminar = (id, cliente) => setConfirmDelete({ id, cliente })
+
+  const agregarRepuesto = (prod) => {
+    const lista = modal.data.repuestos || [];
+    const idx = lista.findIndex(r => r.producto_id === prod.id);
+    if (idx >= 0) {
+      lista[idx].cantidad += 1;
+    } else {
+      lista.push({ producto_id: prod.id, nombre: prod.nombre, cantidad: 1 });
+    }
+    setModal({...modal, data: {...modal.data, repuestos: [...lista]}});
+    setRepuestoBusqueda('');
+    setRepuestoResultados([]);
+  };
+
+  const quitarRepuesto = (productoId) => {
+    const lista = (modal.data.repuestos || []).filter(r => r.producto_id !== productoId);
+    setModal({...modal, data: {...modal.data, repuestos: lista}});
+  };
+
+  const cambiarCantidadRepuesto = (productoId, delta) => {
+    const lista = (modal.data.repuestos || []).map(r =>
+      r.producto_id === productoId ? { ...r, cantidad: Math.max(1, r.cantidad + delta) } : r
+    );
+    setModal({...modal, data: {...modal.data, repuestos: lista}});
+  };
+
+  const handlePriceChange = (field) => (e) => {
+    const input = e.target;
+    const cursorPos = input.selectionStart;
+    const raw = e.target.value;
+
+    const rawBefore = raw.slice(0, cursorPos).replace(/[^\d,\-]/g, '');
+    const relevantLen = rawBefore.length;
+
+    let cleaned = raw.replace(/[^\d,\-]/g, '');
+    const isNegative = cleaned.startsWith('-') ? '-' : '';
+    if (isNegative) cleaned = cleaned.slice(1);
+
+    const commaIdx = cleaned.indexOf(',');
+    let intPart = cleaned;
+    let decPart = '';
+    if (commaIdx !== -1) {
+      intPart = cleaned.slice(0, commaIdx);
+      decPart = cleaned.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2);
+    }
+
+    const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    let result = isNegative + formattedInt;
+    if (commaIdx !== -1 || raw.endsWith(',')) {
+      result += ',' + decPart;
+    }
+
+    let newCursor = result.length;
+    if (relevantLen === 0) {
+      newCursor = 0;
+    } else {
+      let count = 0;
+      for (let i = 0; i < result.length; i++) {
+        if (/[\d,\-]/.test(result[i])) count++;
+        if (count >= relevantLen) { newCursor = i + 1; break; }
+      }
+    }
+
+    if (result !== modal.data[field]) {
+      setModal({...modal, data: {...modal.data, [field]: result}});
+    }
+    requestAnimationFrame(() => {
+      if (input === document.activeElement) {
+        input.selectionStart = input.selectionEnd = newCursor;
+      }
+    });
+  };
 
   const handleCambiarEstado = async (id, nuevoEstado) => {
     if (!nuevoEstado) return
@@ -201,23 +316,26 @@ export default function Reparaciones() {
                 <td style={styles.td}>{r.modelo || '-'}</td>
                 <td style={styles.td}>{tecnicosList.find(t => t.id === r.tecnico_id)?.nombre || '-'}</td>
                 <td style={styles.td}>
-                  <select value={r.estado || 'Pendiente'} onChange={e => handleCambiarEstado(r.id, e.target.value)}
+                  <select value={r.estado || 'En Progreso'} onChange={e => handleCambiarEstado(r.id, e.target.value)}
                     style={{
                       padding: '4px 6px', borderRadius: 6, border: '1px solid #ccc',
                       fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                      color: r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : '#6b7280',
-                      background: r.estado === 'Entregado' ? '#f0fdf4' : r.estado === 'En Progreso' ? '#eff6ff' : r.estado === 'Completado' ? '#fffbeb' : '#f9fafb',
+                      color: r.estado === 'Entregado' ? '#16a34a' : r.estado === 'En Progreso' ? '#2563eb' : r.estado === 'Completado' ? '#d97706' : r.estado === 'Sin Arreglo' ? '#dc2626' : '#6b7280',
+                      background: r.estado === 'Entregado' ? '#f0fdf4' : r.estado === 'En Progreso' ? '#eff6ff' : r.estado === 'Completado' ? '#fffbeb' : r.estado === 'Sin Arreglo' ? '#fef2f2' : '#f9fafb',
                     }}>
-                    <option value="Pendiente">Pendiente</option>
                     <option value="En Progreso">En Progreso</option>
                     <option value="Completado">Completado</option>
                     <option value="Entregado">Entregado</option>
+                    <option value="Sin Arreglo">Sin Arreglo</option>
                   </select>
                 </td>
                 <td style={{ ...styles.td, fontWeight: 800 }}>{fmt(r.total)}</td>
                 <td style={{ ...styles.td, textAlign: 'center' }}>
+                  {(!r.cobrado && (r.estado === 'Completado' || r.estado === 'Entregado')) && (
+                    <button onClick={() => { setCobrarReparacion(r); setShowCobrarModal(true); }} style={{ ...styles.btnAction, color: '#16a34a', fontWeight: 800, fontSize: 11 }}>COBRAR</button>
+                  )}
                   <button onClick={() => abrirModal(r)} style={styles.btnAction}><Icon name="tune" color={UI.accent} size={18} /></button>
-                  <button onClick={() => handleEliminar(r.id, r.cliente)} style={styles.btnAction}><Icon name="trash" color="#ef4444" size={18} /></button>
+                  <button onClick={() => confirmarEliminar(r.id, r.cliente)} style={styles.btnAction}><Icon name="trash" color="#ef4444" size={18} /></button>
                 </td>
               </tr>
             ))}
@@ -279,19 +397,14 @@ export default function Reparaciones() {
                 </div>
               </div>
 
-              <div>
-                <label style={styles.label}>Trabajo Realizado / Notas Técnicas</label>
-                <textarea style={{...styles.modalInput, height: 50}} value={modal.data.arreglo} onChange={e => setModal({...modal, data: {...modal.data, arreglo: e.target.value}})} />
-              </div>
-
               <div style={{ display: 'flex', gap: 15, alignItems: 'end' }}>
                 <div style={{ flex: 1 }}>
                   <label style={styles.label}>Estado</label>
-                  <select value={modal.data.estado || 'Pendiente'} onChange={e => setModal({...modal, data: {...modal.data, estado: e.target.value}})} style={styles.modalInput}>
-                    <option value="Pendiente">Pendiente</option>
+                  <select value={modal.data.estado || 'En Progreso'} onChange={e => setModal({...modal, data: {...modal.data, estado: e.target.value}})} style={styles.modalInput}>
                     <option value="En Progreso">En Progreso</option>
                     <option value="Completado">Completado</option>
                     <option value="Entregado">Entregado</option>
+                    <option value="Sin Arreglo">Sin Arreglo</option>
                   </select>
                 </div>
                 <div style={{ flex: 1 }}>
@@ -303,16 +416,96 @@ export default function Reparaciones() {
                 </div>
               </div>
 
-              {/* AREA DE CIERRE DE ORDEN */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', background: '#f9fafb', padding: 15, borderRadius: 10, gap: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ fontWeight: 800, color: '#374151' }}>PRECIO FINAL:</span>
-                  <input 
-                    type="text"
-                    inputMode="numeric"
-                    style={{...styles.modalInput, width: 150, fontSize: 20, fontWeight: 900, textAlign: 'right', color: UI.accent}} 
-                    value={modal.data.total ? Number(modal.data.total).toLocaleString('es-AR') : ''} 
-                    onChange={e => setModal({...modal, data: {...modal.data, total: e.target.value.replace(/\D/g, '')}})} 
+              {/* REPUESTOS UTILIZADOS */}
+              <div style={{ background: '#f8fafc', padding: 15, borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <span style={{ fontWeight: 800, color: '#374151', fontSize: 13 }}>REPUESTOS DEL LOCAL</span>
+                  <span style={{ fontSize: 11, color: '#6b7280' }}>Se descontarán del stock al cobrar</span>
+                </div>
+
+                {modal.data.repuestos && modal.data.repuestos.length > 0 && (
+                  <div style={{ marginBottom: 10, border: '1px solid #e2e8f0', borderRadius: 8, overflow: 'hidden' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: '#e2e8f0' }}>
+                          <th style={{ padding: '6px 10px', textAlign: 'left' }}>Producto</th>
+                          <th style={{ padding: '6px 10px', textAlign: 'center', width: 100 }}>Cant.</th>
+                          <th style={{ padding: '6px 10px', textAlign: 'center', width: 50 }}></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(modal.data.repuestos || []).map((r, i) => (
+                          <tr key={r.producto_id || i} style={{ borderTop: '1px solid #e2e8f0' }}>
+                            <td style={{ padding: '6px 10px', fontWeight: 600 }}>{r.nombre}</td>
+                            <td style={{ padding: '6px 10px', textAlign: 'center' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                <button onClick={() => cambiarCantidadRepuesto(r.producto_id, -1)} style={{ border: '1px solid #ccc', background: '#fff', borderRadius: 4, cursor: 'pointer', padding: '2px 5px', fontSize: 12 }}>-</button>
+                                <span style={{ fontWeight: 800, fontSize: 14 }}>{r.cantidad}</span>
+                                <button onClick={() => cambiarCantidadRepuesto(r.producto_id, 1)} style={{ border: '1px solid #ccc', background: '#fff', borderRadius: 4, cursor: 'pointer', padding: '2px 5px', fontSize: 12 }}>+</button>
+                              </div>
+                            </td>
+                            <td style={{ padding: '6px 10px', textAlign: 'center' }}>
+                              <button onClick={() => quitarRepuesto(r.producto_id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', fontSize: 14 }}>✕</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    type="text" placeholder="Buscar producto para agregar como repuesto..."
+                    value={repuestoBusqueda}
+                    onChange={e => setRepuestoBusqueda(e.target.value)}
+                    style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13 }}
+                  />
+                </div>
+
+                {repuestoBusqueda.trim() && repuestoResultados.length > 0 && (
+                  <div style={{ marginTop: 6, border: '1px solid #e2e8f0', borderRadius: 6, maxHeight: 150, overflowY: 'auto', background: '#fff' }}>
+                    {repuestoResultados.map(p => (
+                      <div key={p.id} onClick={() => agregarRepuesto(p)}
+                        style={{ display: 'flex', alignItems: 'center', padding: '8px 10px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer', transition: 'background 0.2s', color: '#111827' }}
+                        onMouseEnter={e => e.currentTarget.style.background = '#f1f5f9'}
+                        onMouseLeave={e => e.currentTarget.style.background = '#fff'}
+                      >
+                        <div style={{ flex: 2, fontWeight: 700, fontSize: 13, color: '#111827' }}>{p.nombre}</div>
+                        <div style={{ flex: 1, fontSize: 12, color: '#6b7280' }}>{p.marca || '-'}</div>
+                        <div style={{ flex: 1, fontSize: 12, color: '#6b7280' }}>{p.modelo || '-'}</div>
+                        <div style={{ width: 60, textAlign: 'right', fontSize: 11, fontWeight: 700, color: '#16a34a' }}>
+                          L1: {p.stock_l1 || 0} / L2: {p.stock_l2 || 0}
+                        </div>
+                        <div style={{ width: 30, textAlign: 'right', color: '#2563eb' }}><Icon name="plus" size={16} /></div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {repuestoBusqueda.trim() && repuestoResultados.length === 0 && (
+                  <div style={{ marginTop: 6, padding: 10, textAlign: 'center', color: '#999', fontSize: 12 }}>Sin resultados</div>
+                )}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
+                <div>
+                  <label style={styles.label}>Costo de la Reparación</label>
+                  <input
+                    type="text" inputMode="decimal"
+                    value={modal.data.costo}
+                    onChange={handlePriceChange('costo')}
+                    placeholder="0,00"
+                    style={{ ...styles.modalInput, fontWeight: 800, color: '#dc2626' }}
+                  />
+                </div>
+                <div>
+                  <label style={styles.label}>Precio de Reparación</label>
+                  <input
+                    type="text" inputMode="decimal"
+                    value={modal.data.precio}
+                    onChange={handlePriceChange('precio')}
+                    placeholder="0,00"
+                    style={{ ...styles.modalInput, fontWeight: 800, color: '#16a34a' }}
                   />
                 </div>
               </div>
@@ -333,6 +526,96 @@ export default function Reparaciones() {
           </div>
         </div>
       )}
+
+      {/* MODAL COBRAR REPARACIÓN */}
+      {showCobrarModal && cobrarReparacion && (
+        <div style={styles.overlay}>
+          <div style={{ ...styles.modalContent, width: 500 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20 }}>
+              <h3 style={{ margin: 0, fontWeight: 900, color: UI.accent }}>COBRAR REPARACIÓN</h3>
+              <button onClick={() => { setShowCobrarModal(false); setCobrarReparacion(null); }} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
+              <div style={{ background: '#f0fdf4', padding: 15, borderRadius: 10, border: '1px solid #bbf7d0' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 14 }}>
+                  <div><span style={{ fontWeight: 700, color: '#666' }}>Cliente:</span> <b>{cobrarReparacion.cliente}</b></div>
+                  <div><span style={{ fontWeight: 700, color: '#666' }}>Equipo:</span> <b>{cobrarReparacion.equipo}</b></div>
+                  <div><span style={{ fontWeight: 700, color: '#666' }}>Marca:</span> <b>{cobrarReparacion.marca || '-'}</b></div>
+                  <div><span style={{ fontWeight: 700, color: '#666' }}>Modelo:</span> <b>{cobrarReparacion.modelo || '-'}</b></div>
+                </div>
+              </div>
+
+              {cobrarReparacion.repuestos && cobrarReparacion.repuestos.length > 0 && (
+                <div style={{ background: '#fffbeb', padding: 15, borderRadius: 10, border: '1px solid #fde68a' }}>
+                  <div style={{ fontWeight: 800, fontSize: 13, color: '#92400e', marginBottom: 8 }}>⚠️ REPUESTOS A DESCONTAR DEL STOCK:</div>
+                  {cobrarReparacion.repuestos.map((r, i) => (
+                    <div key={r.producto_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
+                      <span>{r.nombre}</span>
+                      <span style={{ fontWeight: 800 }}>x{r.cantidad}</span>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11, color: '#92400e', marginTop: 6 }}>
+                    * Los repuestos se descuentan del stock a precio $0 (incluidos en el total de la reparación)
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb', padding: 15, borderRadius: 10 }}>
+                <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>TOTAL A COBRAR:</span>
+                <span style={{ fontWeight: 900, fontSize: 28, color: '#16a34a' }}>
+                  ${Number(cobrarReparacion.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 700, color: '#666', marginBottom: 5, display: 'block' }}>MÉTODO DE PAGO</label>
+                <select value={metodoPagoCobro} onChange={e => setMetodoPagoCobro(e.target.value)} style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 700 }}>
+                  <option value="efectivo">💵 Efectivo</option>
+                  <option value="tarjeta">💳 Tarjeta (+10%)</option>
+                  <option value="transferencia">🏦 Transferencia</option>
+                </select>
+              </div>
+
+              <button onClick={async () => {
+                setCobrando(true);
+                try {
+                  const res = await registrarPagoReparacion({
+                    reparacionId: cobrarReparacion.id,
+                    localId: config?.local_id || 1,
+                    usuarioId: usuario?.id,
+                    metodoPago: metodoPagoCobro
+                  });
+                  toast('Reparación cobrada correctamente');
+                  setShowCobrarModal(false);
+                  setCobrarReparacion(null);
+                  await cargar();
+                } catch (err) {
+                  toast(err.message, 'error');
+                } finally {
+                  setCobrando(false);
+                }
+              }} disabled={cobrando} style={{
+                background: UI.accent, color: '#fff', border: 'none', borderRadius: 8,
+                padding: 14, fontWeight: 800, cursor: cobrando ? 'not-allowed' : 'pointer', fontSize: 16
+              }}>
+                {cobrando ? 'PROCESANDO...' : `COBRAR ${Number(cobrarReparacion.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Eliminar Reparación"
+          message={`¿Estás seguro de eliminar la orden de "${confirmDelete.cliente}"? Esta acción no se puede deshacer.`}
+          confirmLabel="Eliminar"
+          danger
+          onConfirm={handleEliminar}
+          onClose={() => setConfirmDelete(null)}
+        />
+      )}
     </div>
   )
 }
@@ -346,7 +629,7 @@ const styles = {
   busqueda: { padding: '10px 15px', borderRadius: 8, border: `1px solid ${UI.border}`, width: 350, fontSize: 14 },
   btnNuevo: { background: UI.accent, color: '#fff', border: 'none', borderRadius: 8, padding: '10px 20px', fontWeight: 800, cursor: 'pointer' },
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
-  modalContent: { background: '#fff', borderRadius: 12, padding: 30, width: 650, boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' },
+  modalContent: { background: '#fff', borderRadius: 12, padding: 30, width: 650, boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)', color: '#111827' },
   label: { fontSize: 11, fontWeight: 700, color: '#666', marginBottom: 5, display: 'block' },
   modalInput: { width: '100%', padding: '10px', borderRadius: 6, border: '1px solid #ccc', fontSize: 14, boxSizing: 'border-box' },
   btnSave: { background: UI.accent, color: '#fff', border: 'none', borderRadius: 8, padding: '14px', fontWeight: 800, cursor: 'pointer' }

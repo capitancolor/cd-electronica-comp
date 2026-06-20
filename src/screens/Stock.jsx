@@ -7,7 +7,7 @@ import StockModales from './StockModales'
 import ErrorBoundary from '../components/ErrorBoundary'
 import { exportarStockExcel, importarStockExcel } from '../services/exportExcel'
 
-const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 })
+const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 const UI = {
   pageBg: '#f0f0f0',
@@ -358,7 +358,7 @@ const fetchDolar = async () => {
             </button>
           )}
 
-          <button onClick={() => { console.log('Stock a exportar:', stockFiltrado?.length || 0); exportarStockExcel(stockFiltrado); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
+          <button onClick={() => { console.log('Stock a exportar:', stockFiltrado?.length || 0); exportarStockExcel(stockFiltrado, filtroLocal); }} title="Exportar Stock a Excel" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 15px', borderRadius: 8, fontWeight: 800, fontSize: 11, cursor: 'pointer' }}>
             📊 EXCEL
           </button>
           {esAdmin && (

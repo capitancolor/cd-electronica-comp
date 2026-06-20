@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { getVentas, getGastos, registrarGasto, eliminarGasto, actualizarGasto } from '../services/negocio'
+import { getVentas, getGastos, getLocales, registrarGasto, eliminarGasto, actualizarGasto } from '../services/negocio'
 import { Icon, Badge, toast, ConfirmDialog } from '../components/UI'
 import { exportarGastosExcel } from '../services/exportExcel'
 
@@ -21,6 +21,28 @@ const UI = {
   inputBg: '#ffffff', inputBorder: '#d1d5db'
 }
 
+function SortableTh({ label, field, sortConfig, onSort, align = 'left', color = '#dbdee3' }) {
+  const isSorted = sortConfig.key === field;
+  return (
+    <th onClick={() => onSort(field)} style={{
+      padding: '12px 20px',
+      textAlign: align,
+      cursor: 'pointer',
+      userSelect: 'none',
+      color: isSorted ? '#2196f3' : color,
+      fontSize: 11,
+      fontWeight: 800
+    }}>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {label}
+        <span style={{ fontSize: 10, opacity: isSorted ? 1 : 0.3 }}>
+          {isSorted ? (sortConfig.direction === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </div>
+    </th>
+  )
+}
+
 function StatCard({ label, value, icon, color }) {
   return (
     <div style={{ background: UI.cardBg, border: `1px solid ${UI.cardBorder}`, borderRadius: 12, padding: 15, flex: 1 }}>
@@ -33,7 +55,7 @@ function StatCard({ label, value, icon, color }) {
   )
 }
 
-export default function Gastos({ usuario }) {
+export default function Gastos({ usuario, config }) {
   const [gastos, setGastos] = useState([])
   const [ventas, setVentas] = useState([])
   const [loading, setLoading] = useState(false)
@@ -43,12 +65,32 @@ export default function Gastos({ usuario }) {
   const [modal, setModal] = useState({ show: false, data: null })
   const [eliminarId, setEliminarId] = useState(null)
   const [detalleDia, setDetalleDia] = useState(null)
+  const [detalleVentasDia, setDetalleVentasDia] = useState(null)
+  const [locales, setLocales] = useState([])
+  const [filtroLocal, setFiltroLocal] = useState(usuario.rol !== 'admin' && config?.local_id ? String(config.local_id) : '')
 
-  const estadoInicial = { descripcion: '', monto: '', dias_aplicados: [] }
+  const [sortGastos, setSortGastos] = useState({ key: 'descripcion', direction: 'asc' })
+  const [sortRendimiento, setSortRendimiento] = useState({ key: 'dia', direction: 'asc' })
 
-  useEffect(() => { cargarDatos() }, [mesActual, anioActual])
+  const estadoInicial = { descripcion: '', monto: '', metodo_pago: 'efectivo', dias_aplicados: [] }
 
+  useEffect(() => { cargarDatos() }, [mesActual, anioActual, filtroLocal])
 
+  useEffect(() => {
+    getLocales().then(setLocales)
+  }, [])
+
+  const handleSortGastos = (key) => {
+    let direction = 'asc';
+    if (sortGastos.key === key && sortGastos.direction === 'asc') direction = 'desc';
+    setSortGastos({ key, direction });
+  }
+
+  const handleSortRendimiento = (key) => {
+    let direction = 'asc';
+    if (sortRendimiento.key === key && sortRendimiento.direction === 'asc') direction = 'desc';
+    setSortRendimiento({ key, direction });
+  }
 
 async function cargarDatos() {
   setLoading(true);
@@ -59,7 +101,7 @@ async function cargarDatos() {
   try {
     // 1. Probamos ventas primero
     console.log("Intentando cargar ventas...");
-    const v = await getVentas({ fechaDesde: desde, fechaHasta: hasta, limit: 1000 });
+    const v = await getVentas({ localId: filtroLocal || null, fechaDesde: desde, fechaHasta: hasta, limit: 1000 });
     setVentas(v || []);
 
     // 2. Probamos gastos después (separado para aislar el error)
@@ -96,7 +138,7 @@ async function cargarDatos() {
   const abrirModal = (gasto = null) => {
     setModal({
       show: true,
-      data: gasto ? { ...gasto, monto: gasto.monto != null ? String(gasto.monto).replace('.', ',') : '', dias_aplicados: gasto.dias_aplicados || [] } : { ...estadoInicial }
+      data: gasto ? { ...gasto, monto: gasto.monto != null ? String(gasto.monto).replace('.', ',') : '', metodo_pago: gasto.metodo_pago || 'efectivo', dias_aplicados: gasto.dias_aplicados || [] } : { ...estadoInicial }
     })
   }
 
@@ -115,6 +157,7 @@ async function cargarDatos() {
       const payload = {
         ...data,
         monto: normalizarNumero(data.monto),
+        metodo_pago: data.metodo_pago || 'efectivo',
         usuario_id: usuario.id,
         fecha: new Date(anioActual, mesActual, 1).toISOString(),
         dias_aplicados: data.dias_aplicados?.length > 0 ? data.dias_aplicados : null
@@ -161,13 +204,74 @@ async function cargarDatos() {
   }
 
   const totalGastosMes = gastos.reduce((s, g) => s + Number(g.monto), 0)
-  const totalGananciaMes = ventas.reduce((s, v) => s + (Number(v.total) - Number(v.costo_total || 0)), 0)
+  const totalGananciaMes = ventas.reduce((s, v) => {
+    const base = Number(v.total) - Number(v.costo_total || 0);
+    const notaDebito = (v.venta_items || [])
+      .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
+      .reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
+    return s + base - notaDebito;
+  }, 0)
+
+  const gastosOrdenados = useMemo(() => {
+    return [...gastos].sort((a, b) => {
+      let valA, valB;
+      if (sortGastos.key === 'monto') {
+        valA = Number(a.monto || 0);
+        valB = Number(b.monto || 0);
+      } else if (sortGastos.key === 'aplicacion') {
+        valA = a.dias_aplicados?.length || diasEnMes;
+        valB = b.dias_aplicados?.length || diasEnMes;
+      } else {
+        valA = (a[sortGastos.key] || '').toString().toLowerCase();
+        valB = (b[sortGastos.key] || '').toString().toLowerCase();
+      }
+      if (valA < valB) return sortGastos.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return sortGastos.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [gastos, sortGastos])
+
+  const rendimientoData = useMemo(() => {
+    const rows = Array.from({ length: diasEnMes }, (_, i) => {
+      const d = i + 1;
+      const gDia = getGastoParaDia(d);
+      const vDia = ventas.filter(v => {
+        const dia = parseInt(v.fecha?.split('T')[0]?.split('-')[2], 10);
+        return dia === d;
+      });
+      const ganDia = vDia.reduce((acc, v) => {
+        const base = Number(v.total) - Number(v.costo_total || 0);
+        const notaDebito = (v.venta_items || [])
+          .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
+          .reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
+        return acc + base - notaDebito;
+      }, 0);
+      const totalVentasDia = vDia.reduce((acc, v) => acc + Number(v.total || 0), 0);
+      const bal = ganDia - gDia;
+      const esFuturo = (anioActual === hoy.getFullYear() && mesActual === hoy.getMonth() && d > hoy.getDate());
+      return { d, gDia, ganDia, totalVentasDia, bal, esFuturo, ventasDia: vDia };
+    });
+    return rows.sort((a, b) => {
+      let valA, valB;
+      if (['ganancia', 'gasto', 'balance', 'totalVentasDia'].includes(sortRendimiento.key)) {
+        const map = { ganancia: 'ganDia', gasto: 'gDia', balance: 'bal', totalVentasDia: 'totalVentasDia' };
+        valA = a[map[sortRendimiento.key]];
+        valB = b[map[sortRendimiento.key]];
+      } else {
+        valA = a[sortRendimiento.key];
+        valB = b[sortRendimiento.key];
+      }
+      if (valA < valB) return sortRendimiento.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return sortRendimiento.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [gastos, ventas, diasEnMes, sortRendimiento])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 15, padding: 20, background: UI.pageBg }}>
       
       {/* HEADER */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', gap: 15, alignItems: 'center' }}>
           <h2 style={{ fontSize: 20, fontWeight: 900, margin: 0, color: '#111827'}}>CONTROL DE GASTOS</h2>
           <div style={{ display: 'flex', gap: 5 }}>
@@ -179,6 +283,12 @@ async function cargarDatos() {
             <select value={anioActual} onChange={e => setAnioActual(Number(e.target.value))} style={styles.selectHeader}>
               {[2025, 2026].map(a => <option key={a} value={a}>{a}</option>)}
             </select>
+            <select value={filtroLocal} onChange={e => setFiltroLocal(e.target.value)} style={styles.selectHeader}>
+              <option value="">Todos los locales</option>
+              {locales.map(l => (
+                <option key={l.id} value={l.id}>{l.nombre}</option>
+              ))}
+            </select>
           </div>
         </div>
       </div>
@@ -186,9 +296,10 @@ async function cargarDatos() {
       {/* STATS */}
       <div style={{ display: 'flex', gap: 15 }}>
         <StatCard label="Total Gastos del Mes" value={fmt(totalGastosMes)} icon="reports" color={UI.statGastos} />
-        <StatCard label="Obj. Diario" value={fmt(totalGastosMes / diasEnMes)} icon="check" color="#d97706" />
+        <StatCard label="Gastos Efectivo" value={fmt(gastos.filter(g => g.metodo_pago !== 'transferencia').reduce((s, g) => s + Number(g.monto), 0))} icon="pos" color="#16a34a" />
+        <StatCard label="Gastos Transferencia" value={fmt(gastos.filter(g => g.metodo_pago === 'transferencia').reduce((s, g) => s + Number(g.monto), 0))} icon="stock" color="#2563eb" />
         <StatCard label="Ganancia en el Mes" value={fmt(totalGananciaMes)} icon="pos" color={UI.statGanancia} />
-        <StatCard label="Balance Neto" value={fmt(totalGananciaMes - totalGastosMes)} icon="stock" color={(totalGananciaMes - totalGastosMes) >= 0 ? UI.statGanancia : UI.statGastos} />
+        <StatCard label="Ganancia Neta" value={fmt(totalGananciaMes - totalGastosMes)} icon="stock" color={(totalGananciaMes - totalGastosMes) >= 0 ? UI.statGanancia : UI.statGastos} />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 20, flex: 1, minHeight: 0 }}>
@@ -208,18 +319,22 @@ async function cargarDatos() {
             <table style={styles.table}>
               <thead style={styles.thead}>
                 <tr>
-                  <th style={styles.th}>DESCRIPCIÓN</th>
-                  <th style={styles.th}>APLICACIÓN</th>
-                  <th style={{ ...styles.th, textAlign: 'right' }}>MONTO</th>
+                  <SortableTh label="DESCRIPCIÓN" field="descripcion" sortConfig={sortGastos} onSort={handleSortGastos} />
+                  <SortableTh label="APLICACIÓN" field="aplicacion" sortConfig={sortGastos} onSort={handleSortGastos} />
+                  <SortableTh label="PAGO" field="metodo_pago" sortConfig={sortGastos} onSort={handleSortGastos} />
+                  <SortableTh label="MONTO" field="monto" sortConfig={sortGastos} onSort={handleSortGastos} align="right" />
                   <th style={{ ...styles.th, textAlign: 'center' }}>ACCIONES</th>
                 </tr>
               </thead>
               <tbody>
-                {gastos.map(g => (
+                {gastosOrdenados.map(g => (
                   <tr key={g.id} style={styles.tr}>
                     <td style={{ ...styles.td, fontWeight: 700 }}>{g.descripcion}</td>
                     <td style={styles.td}>
                       <Badge color="#6b7280">{g.dias_aplicados ? `${g.dias_aplicados.length} días` : 'Mes Completo'}</Badge>
+                    </td>
+                    <td style={styles.td}>
+                      <Badge color={g.metodo_pago === 'transferencia' ? '#2563eb' : '#16a34a'}>{g.metodo_pago === 'transferencia' ? 'TRANSFERENCIA' : 'EFECTIVO'}</Badge>
                     </td>
                     <td style={{ ...styles.td, textAlign: 'right', fontWeight: 900, color: UI.statGastos }}>{fmt(g.monto)}</td>
                     <td style={{ ...styles.td, textAlign: 'center' }}>
@@ -240,33 +355,29 @@ async function cargarDatos() {
             <table style={styles.table}>
               <thead style={styles.thead}>
                 <tr>
-                  <th style={styles.th}>DÍA</th>
-                  <th style={{ ...styles.th, textAlign: 'right' }}>GANANCIA</th>
-                  <th style={{ ...styles.th, textAlign: 'right' }}>GASTO</th>
-                  <th style={{ ...styles.th, textAlign: 'right' }}>BALANCE</th>
+                  <SortableTh label="DÍA" field="dia" sortConfig={sortRendimiento} onSort={handleSortRendimiento} />
+                  <SortableTh label="VENTAS" field="totalVentasDia" sortConfig={sortRendimiento} onSort={handleSortRendimiento} align="right" />
+                  <SortableTh label="GANANCIA" field="ganancia" sortConfig={sortRendimiento} onSort={handleSortRendimiento} align="right" />
+                  <SortableTh label="GASTO" field="gasto" sortConfig={sortRendimiento} onSort={handleSortRendimiento} align="right" />
+                  <SortableTh label="BALANCE" field="balance" sortConfig={sortRendimiento} onSort={handleSortRendimiento} align="right" />
                 </tr>
               </thead>
               <tbody>
-                {Array.from({ length: diasEnMes }, (_, i) => {
-                  const d = i + 1;
-                  const gDia = getGastoParaDia(d);
-                  const vDia = ventas.filter(v => new Date(v.fecha).getDate() === d);
-                  const ganDia = vDia.reduce((acc, v) => acc + (Number(v.total) - Number(v.costo_total || 0)), 0);
-                  const bal = ganDia - gDia;
-                  const esFuturo = (anioActual === hoy.getFullYear() && mesActual === hoy.getMonth() && d > hoy.getDate());
-                  return (
-                    <tr key={d} style={{ ...styles.tr, opacity: esFuturo ? 0.4 : 1 }}>
-                      <td style={{ ...styles.td, fontWeight: 700 }}>Día {d}</td>
-                      <td style={{ ...styles.td, textAlign: 'right', color: UI.statGanancia }}>{ganDia > 0 ? fmt(ganDia) : '-'}</td>
-                      <td style={{ ...styles.td, textAlign: 'right', color: UI.statGastos }}>
-                        <span onClick={() => gDia > 0 && setDetalleDia({ dia: d, gastos: getGastosDetalleParaDia(d) })} style={{ cursor: gDia > 0 ? 'pointer' : 'default', textDecoration: gDia > 0 ? 'underline' : 'none', textDecorationStyle: 'dotted' }}>{fmt(gDia)}</span>
-                      </td>
-                      <td style={{ ...styles.td, textAlign: 'right', fontWeight: 800, color: bal >= 0 ? UI.statGanancia : UI.statGastos }}>
-                        {fmt(bal)}
-                      </td>
-                    </tr>
-                  )
-                })}
+                {rendimientoData.map(({ d, gDia, ganDia, totalVentasDia, bal, esFuturo, ventasDia }) => (
+                  <tr key={d} style={{ ...styles.tr, opacity: esFuturo ? 0.4 : 1 }}>
+                    <td style={{ ...styles.td, fontWeight: 700 }}>Día {d}</td>
+                    <td style={{ ...styles.td, textAlign: 'right', color: '#2563eb' }}>
+                      <span onClick={() => totalVentasDia > 0 && setDetalleVentasDia({ dia: d, ventas: ventasDia })} style={{ cursor: totalVentasDia > 0 ? 'pointer' : 'default', textDecoration: totalVentasDia > 0 ? 'underline' : 'none', textDecorationStyle: 'dotted' }}>{fmt(totalVentasDia)}</span>
+                    </td>
+                    <td style={{ ...styles.td, textAlign: 'right', color: ganDia >= 0 ? UI.statGanancia : UI.statGastos }}>{fmt(ganDia)}</td>
+                    <td style={{ ...styles.td, textAlign: 'right', color: UI.statGastos }}>
+                      <span onClick={() => gDia > 0 && setDetalleDia({ dia: d, gastos: getGastosDetalleParaDia(d) })} style={{ cursor: gDia > 0 ? 'pointer' : 'default', textDecoration: gDia > 0 ? 'underline' : 'none', textDecorationStyle: 'dotted' }}>{fmt(gDia)}</span>
+                    </td>
+                    <td style={{ ...styles.td, textAlign: 'right', fontWeight: 800, color: bal >= 0 ? UI.statGanancia : UI.statGastos }}>
+                      {fmt(bal)}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -291,6 +402,11 @@ async function cargarDatos() {
                 if (parts.length === 2 && parts[1].length > 2) raw = parts[0] + ',' + parts[1].slice(0, 2)
                 setModal({...modal, data: {...modal.data, monto: raw}})
               }} />
+
+              <select value={modal.data.metodo_pago || 'efectivo'} onChange={e => setModal({...modal, data: {...modal.data, metodo_pago: e.target.value}})} style={{ ...styles.input, fontWeight: 700 }}>
+                <option value="efectivo">💵 Efectivo</option>
+                <option value="transferencia">🏦 Transferencia</option>
+              </select>
               
               <div style={styles.calendarContainer}>
                 <div style={{ display: 'flex', gap: 5, marginBottom: 10 }}>
@@ -378,8 +494,8 @@ async function cargarDatos() {
                 <thead>
                   <tr style={{ borderBottom: `2px solid ${UI.border}` }}>
                     <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Descripción</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Pago</th>
                     <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Días</th>
-                    <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Total</th>
                     <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Hoy</th>
                   </tr>
                 </thead>
@@ -387,8 +503,10 @@ async function cargarDatos() {
                   {detalleDia.gastos.map(g => (
                     <tr key={g.id} style={{ borderBottom: `1px solid ${UI.border}` }}>
                       <td style={{ padding: '8px 10px', fontWeight: 700, color: '#000' }}>{g.descripcion}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                        <Badge color={g.metodo_pago === 'transferencia' ? '#2563eb' : '#16a34a'}>{g.metodo_pago === 'transferencia' ? 'TRANSFERENCIA' : 'EFECTIVO'}</Badge>
+                      </td>
                       <td style={{ padding: '8px 10px', textAlign: 'center', color: '#000' }}>{g.dias_aplicados?.length || diasEnMes}</td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', color: '#000' }}>{fmt(g.monto)}</td>
                       <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 900, color: UI.statGastos }}>{fmt(g.montoDia)}</td>
                     </tr>
                   ))}
@@ -397,6 +515,44 @@ async function cargarDatos() {
             </div>
             <div style={{ borderTop: `2px solid ${UI.border}`, padding: '12px 10px 0', textAlign: 'right', fontWeight: 900, fontSize: 15 }}>
               Total día: {fmt(detalleDia.gastos.reduce((s, g) => s + g.montoDia, 0))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {detalleVentasDia && (
+        <div style={styles.overlay} onClick={() => setDetalleVentasDia(null)}>
+          <div style={{ ...styles.modal, width: 550, maxHeight: '70vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 }}>
+              <h3 style={{ margin: 0, fontWeight: 900, fontSize: 15, color: '#000' }}>VENTAS DEL DÍA {detalleVentasDia.dia}</h3>
+              <button onClick={() => setDetalleVentasDia(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18 }}>✕</button>
+            </div>
+            <div style={{ overflow: 'auto', flex: 1 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: `2px solid ${UI.border}` }}>
+                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Producto</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Local</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'center', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Pago</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'right', fontSize: 10, color: '#dbdee3', textTransform: 'uppercase' }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detalleVentasDia.ventas.map(v => (
+                    <tr key={v.id} style={{ borderBottom: `1px solid ${UI.border}` }}>
+                      <td style={{ padding: '8px 10px', fontWeight: 700, color: '#000' }}>{v.productos_nombres || 'Venta Directa'}</td>
+                      <td style={{ padding: '8px 10px', color: '#000' }}>{v.local_nombre}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                        <Badge color={v.metodo_pago === 'efectivo' ? '#16a34a' : v.metodo_pago === 'tarjeta' ? '#2563eb' : v.metodo_pago === 'transferencia' ? '#d97706' : '#6b7280'}>{v.metodo_pago?.toUpperCase()}</Badge>
+                      </td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 900, color: '#2563eb' }}>{fmt(v.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ borderTop: `2px solid ${UI.border}`, padding: '12px 10px 0', textAlign: 'right', fontWeight: 900, fontSize: 15 }}>
+              Total ventas día: {fmt(detalleVentasDia.ventas.reduce((s, v) => s + Number(v.total || 0), 0))}
             </div>
           </div>
         </div>

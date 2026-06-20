@@ -4,14 +4,26 @@ import { toast, Icon } from '../components/UI'
 import { crearProducto, getCategorias, getProveedores } from '../services/negocio'
 import Database from '@tauri-apps/plugin-sql' // <-- Asegurate de tener este import
 
-const formatPesos = (val) => {
-  if (!val && val !== 0) return ''
-  const raw = String(val).replace(/\./g, '')
-  if (!raw) return ''
-  return raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+const formatPesos = (raw) => {
+  if (!raw && raw !== 0) return ''
+  const str = String(raw)
+  if (str.includes(',')) {
+    const numericStr = str.replace(/\./g, '').replace(',', '.')
+    const num = parseFloat(numericStr)
+    return isNaN(num) ? str : num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  }
+  if (str.includes('.')) {
+    const dotCount = (str.match(/\./g) || []).length
+    if (dotCount === 1) {
+      const num = parseFloat(str)
+      return isNaN(num) ? str : num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    }
+  }
+  const num = parseFloat(str.replace(/[^\d]/g, ''))
+  return isNaN(num) ? str : num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-const stripFormat = (val) => String(val).replace(/\./g, '')
+const stripFormat = (val) => String(val).replace(/\./g, '').replace(',', '.')
 
 export default function StockModales({
   modal, cerrarModal, formMov, setFormMov, formNuevo, setFormNuevo,
@@ -327,12 +339,12 @@ export default function StockModales({
                     <label style={{ fontWeight: 700, fontSize: 11, color: '#854d0e', marginBottom: 3, display: 'block' }}>Precio de Oferta (ARS)</label>
                     <input 
                       type="text"
-                      inputMode="numeric"
-                      placeholder="Ej: 5.500"
+                      inputMode="decimal"
+                      placeholder="Ej: 5.500,00"
                       value={formatPesos(isEdit ? modal.item.precio_promo : formNuevo.precio_promo)} 
                       onChange={e => {
                         const raw = stripFormat(e.target.value)
-                        if (raw === '' || /^\d+$/.test(raw)) {
+                        if (raw === '' || /^\d+(\.\d{0,2})?$/.test(raw)) {
                           isEdit ? setModal({...modal, item: {...modal.item, precio_promo: raw}}) : setFormNuevo({...formNuevo, precio_promo: raw})
                         }
                       }} 
@@ -356,7 +368,7 @@ export default function StockModales({
               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: 10, alignItems: 'end' }}>
                 <div>
                   <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Costo ARS</label>
-                  <input type="text" inputMode="numeric" value={formatPesos(isEdit ? modal.item.precio_costo : formNuevo.precio_costo)} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
+                  <input type="text" inputMode="decimal" value={formatPesos(isEdit ? modal.item.precio_costo : formNuevo.precio_costo)} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ background: '#f4f4f4', padding: '10px', borderRadius: 8, border: '1px solid #eee', textAlign: 'center' }}>
@@ -374,9 +386,9 @@ export default function StockModales({
 
               <div>
                 <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Venta Final ARS (Normal)</label>
-                <input type="text" inputMode="numeric" value={formatPesos(isEdit ? modal.item.precio_venta : formNuevo.precio_venta)} onChange={e => {
+                <input type="text" inputMode="decimal" value={formatPesos(isEdit ? modal.item.precio_venta : formNuevo.precio_venta)} onChange={e => {
                   const raw = stripFormat(e.target.value)
-                  if (raw === '' || /^\d+$/.test(raw)) {
+                  if (raw === '' || /^\d+(\.\d{0,2})?$/.test(raw)) {
                     isEdit ? setModal({...modal, item: {...modal.item, precio_venta: raw}}) : setFormNuevo({...formNuevo, precio_venta: raw})
                   }
                 }} style={{ width: '100%', padding: 12, border: '1px solid #2e7d32', borderRadius: 8, fontSize: 18, fontWeight: 800, color: '#000' }} />
