@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Database from '@tauri-apps/plugin-sql'
 import { eliminarProducto, getProveedores, importarProductosDesdeExcel, getStock } from '../services/negocio'
 import { supabase } from '../supabase'
-import { Icon, toast } from '../components/UI'
+import { Icon, toast, ConfirmDialog } from '../components/UI'
 import StockModales from './StockModales'
 import ErrorBoundary from '../components/ErrorBoundary'
 import { exportarStockExcel, importarStockExcel } from '../services/exportExcel'
@@ -86,6 +86,7 @@ export default function Stock({ usuario, config }) {
   const [sortConfig, setSortConfig] = useState({ key: 'nombre', direction: 'asc' })
   const [modal, setModal] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(null)
   const [ready, setReady] = useState(false)
   const [cotizacion, setCotizacion] = useState(1100)
   const dbRef = useRef(null)
@@ -253,13 +254,12 @@ const fetchDolar = async () => {
     setSortConfig({ key, direction });
   }
 
-  const handleEliminar = async (p) => {
-    alert(`ATENCIÓN: Vas a eliminar el producto "${p.nombre}". Esta acción no se puede deshacer.`);
-    if (!window.confirm(`¿Confirmas eliminar "${p.nombre}"?`)) return;
+  const handleEliminar = async () => {
+    if (!confirmDelete) return
+    setLoading(true);
     try {
-      setLoading(true);
-      setStock(prev => prev.filter(item => item.id !== p.id));
-      const { error } = await eliminarProducto(p.id);
+      setStock(prev => prev.filter(item => item.id !== confirmDelete.id));
+      const { error } = await eliminarProducto(confirmDelete.id);
       if (error) throw error;
       toast('Producto eliminado', 'success');
       cargarStock();
@@ -268,6 +268,7 @@ const fetchDolar = async () => {
       cargarStock();
     } finally {
       setLoading(false);
+      setConfirmDelete(null);
     }
   }
 
@@ -474,7 +475,7 @@ const fetchDolar = async () => {
                     <div style={{ display: 'flex', gap: 4, padding: '4px' }}>
                       {esAdmin && (<ActionIconButton color="#555" title="Editar" onClick={() => setModal({ tipo: 'editar', item: p })}><Icon name="tune" /></ActionIconButton>)}
                       <ActionIconButton color="#e65100" title="Transferir" onClick={() => setModal({ tipo: 'transferir', item: p })}><Icon name="transfer" /></ActionIconButton>
-                      {esAdmin && (<ActionIconButton color="#d32f2f" title="Eliminar" onClick={() => handleEliminar(p)}><Icon name="trash" /></ActionIconButton>)}
+                      {esAdmin && (<ActionIconButton color="#d32f2f" title="Eliminar" onClick={() => setConfirmDelete(p)}><Icon name="trash" /></ActionIconButton>)}
                     </div>
                   </td>
                 </tr>
@@ -538,6 +539,17 @@ const fetchDolar = async () => {
           stock={stock}
         />
       </ErrorBoundary>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Eliminar Producto"
+          message={`¿Estás seguro de eliminar "${confirmDelete.nombre}"? Esta acción no se puede deshacer.`}
+          confirmLabel="Eliminar"
+          danger
+          onConfirm={handleEliminar}
+          onClose={() => setConfirmDelete(null)}
+        />
+      )}
     </div>
   )
 }

@@ -120,6 +120,7 @@ const [filtroModelo, setFiltroModelo] = useState('')
   const [repSeleccionada, setRepSeleccionada] = useState(null)
   const [metodoPagoRep, setMetodoPagoRep] = useState('efectivo')
   const [cobrandoRep, setCobrandoRep] = useState(false)
+  const [mixtoDataRep, setMixtoDataRep] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
 
   const [showNcModal, setShowNcModal] = useState(false)
   const [ncCarrito, setNcCarrito] = useState([])
@@ -341,6 +342,15 @@ const cargarListasBase = async () => {
 
   const recargoTarjeta = (metodo === 'tarjeta') ? (subtotalCarrito * 0.10) : (nTarjeta * 0.10)
   const totalFinal = subtotalCarrito + recargoTarjeta;
+
+  const totalBaseRep = Number(repSeleccionada?.total || 0)
+  const nEfRep = Number(mixtoDataRep.efectivo) || 0
+  const nTarjRep = Number(mixtoDataRep.tarjeta) || 0
+  const nTransfRep = Number(mixtoDataRep.transferencia) || 0
+  const recargoTarjetaRep = metodoPagoRep === 'tarjeta' ? totalBaseRep * 0.10 : (metodoPagoRep === 'mixto' ? nTarjRep * 0.10 : 0)
+  const totalFinalRep = totalBaseRep + recargoTarjetaRep
+  const totalIngresadoRep = nEfRep + nTarjRep + nTransfRep
+  const faltaCubrirRep = totalBaseRep - totalIngresadoRep
 
   function agregarAlCarrito(prod) {
   // Validación inicial
@@ -1410,43 +1420,89 @@ async function confirmarVentaFinal() {
                 )}
 
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb', padding: 15, borderRadius: 10 }}>
-                  <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>TOTAL:</span>
+                  <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>SUBTOTAL:</span>
+                  <span style={{ fontWeight: 900, fontSize: 24, color: '#374151' }}>
+                    ${totalBaseRep.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+
+                {recargoTarjetaRep > 0 && (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 15px' }}>
+                    <span style={{ fontWeight: 700, fontSize: 14, color: '#dc2626' }}>Recargo tarjeta (10%):</span>
+                    <span style={{ fontWeight: 900, fontSize: 18, color: '#dc2626' }}>
+                      +${recargoTarjetaRep.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f0fdf4', padding: 15, borderRadius: 10, border: '1px solid #bbf7d0' }}>
+                  <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>TOTAL A COBRAR:</span>
                   <span style={{ fontWeight: 900, fontSize: 28, color: '#16a34a' }}>
-                    ${Number(repSeleccionada.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ${totalFinalRep.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
 
                 <div>
                   <label style={{ fontSize: 12, fontWeight: 700, color: '#666', marginBottom: 5, display: 'block' }}>MÉTODO DE PAGO</label>
-                  <select value={metodoPagoRep} onChange={e => setMetodoPagoRep(e.target.value)} style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 700 }}>
+                  <select value={metodoPagoRep} onChange={e => { setMetodoPagoRep(e.target.value); setMixtoDataRep({ efectivo: '', tarjeta: '', transferencia: '' }); }} style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 700 }}>
                     <option value="efectivo">💵 Efectivo</option>
                     <option value="tarjeta">💳 Tarjeta (+10%)</option>
                     <option value="transferencia">🏦 Transferencia</option>
+                    <option value="mixto">🔀 Pago Mixto</option>
                   </select>
                 </div>
 
+                {metodoPagoRep === 'mixto' && (
+                  <div style={{ display: 'flex', gap: 8, background: '#f8fafc', padding: 12, borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                    <div style={{ flex: 1 }}>
+                      <span style={{ fontSize: 9, fontWeight: 900, display: 'block', color: '#666' }}>EFECTIVO</span>
+                      <input type="number" value={mixtoDataRep.efectivo} onChange={e => setMixtoDataRep({ ...mixtoDataRep, efectivo: e.target.value })}
+                        style={{ width: '100%', height: 35, borderRadius: 6, border: '1px solid #ccc', padding: '0 8px', fontWeight: 700 }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <span style={{ fontSize: 9, fontWeight: 900, display: 'block', color: '#666' }}>TARJETA</span>
+                      <input type="number" value={mixtoDataRep.tarjeta} onChange={e => setMixtoDataRep({ ...mixtoDataRep, tarjeta: e.target.value })}
+                        style={{ width: '100%', height: 35, borderRadius: 6, border: '1px solid #ccc', padding: '0 8px', fontWeight: 700 }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <span style={{ fontSize: 9, fontWeight: 900, display: 'block', color: '#666' }}>TRANSF.</span>
+                      <input type="number" value={mixtoDataRep.transferencia} onChange={e => setMixtoDataRep({ ...mixtoDataRep, transferencia: e.target.value })}
+                        style={{ width: '100%', height: 35, borderRadius: 6, border: '1px solid #ccc', padding: '0 8px', fontWeight: 700 }} />
+                    </div>
+                  </div>
+                )}
+                {metodoPagoRep === 'mixto' && faltaCubrirRep > 0 && (
+                  <div style={{ textAlign: 'center', color: '#dc2626', fontWeight: 700, fontSize: 13 }}>
+                    FALTAN: ${faltaCubrirRep.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                )}
+
                 <VentaButton ui={UI} onClick={async () => {
+                  if (metodoPagoRep === 'mixto' && faltaCubrirRep > 0) return toast('Completá los montos del pago mixto', 'error');
                   setCobrandoRep(true);
                   try {
                     const res = await registrarPagoReparacion({
                       reparacionId: repSeleccionada.id,
                       localId: config.local_id,
                       usuarioId: usuario.id,
-                      metodoPago: metodoPagoRep
+                      metodoPago: metodoPagoRep,
+                      totalFinal: totalFinalRep,
+                      detalleMixto: metodoPagoRep === 'mixto' ? mixtoDataRep : undefined
                     });
-                    setTicketModal({ total: repSeleccionada.total });
+                    setTicketModal({ total: totalFinalRep });
                     setShowRepModal(false);
                     setRepSeleccionada(null);
                     setRepBusqueda('');
                     setRepResultados([]);
+                    setMixtoDataRep({ efectivo: '', tarjeta: '', transferencia: '' });
                     actualizarResumen();
                   } catch (err) {
                     toast(err.message, 'error');
                   } finally {
                     setCobrandoRep(false);
                   }
-                }} disabled={cobrandoRep} style={{ background: '#2563eb', borderColor: '#2563eb' }}>
-                  {cobrandoRep ? '⏳ COBRANDO...' : `COBRAR ${Number(repSeleccionada.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                }} disabled={cobrandoRep || (metodoPagoRep === 'mixto' && faltaCubrirRep > 0)} style={{ background: '#2563eb', borderColor: '#2563eb' }}>
+                  {cobrandoRep ? '⏳ COBRANDO...' : `COBRAR ${totalFinalRep.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                 </VentaButton>
               </div>
             )}

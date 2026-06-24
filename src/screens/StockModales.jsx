@@ -4,26 +4,63 @@ import { toast, Icon } from '../components/UI'
 import { crearProducto, getCategorias, getProveedores } from '../services/negocio'
 import Database from '@tauri-apps/plugin-sql' // <-- Asegurate de tener este import
 
-const formatPesos = (raw) => {
-  if (!raw && raw !== 0) return ''
-  const str = String(raw)
-  if (str.includes(',')) {
-    const numericStr = str.replace(/\./g, '').replace(',', '.')
-    const num = parseFloat(numericStr)
-    return isNaN(num) ? str : num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  }
-  if (str.includes('.')) {
-    const dotCount = (str.match(/\./g) || []).length
-    if (dotCount === 1) {
-      const num = parseFloat(str)
-      return isNaN(num) ? str : num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    }
-  }
-  const num = parseFloat(str.replace(/[^\d]/g, ''))
-  return isNaN(num) ? str : num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const stripFormat = (val) => String(val).replace(/\./g, '').replace(',', '.')
+
+const fmtInitial = (v) => {
+  if (v === '' || v === undefined || v === null || v === 0) return ''
+  const str = String(v)
+  if (str.includes(',') || str.match(/\.\d{2}$/)) return str
+  const num = parseFloat(str.replace(/[^\d.-]/g, ''))
+  if (isNaN(num)) return str
+  return num.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-const stripFormat = (val) => String(val).replace(/\./g, '').replace(',', '.')
+const makePriceHandler = (setter, getter) => (e) => {
+  const input = e.target
+  const cursorPos = input.selectionStart
+  const raw = e.target.value
+
+  const rawBefore = raw.slice(0, cursorPos).replace(/[^\d,\-]/g, '')
+  const relevantLen = rawBefore.length
+
+  let cleaned = raw.replace(/[^\d,\-]/g, '')
+  const isNegative = cleaned.startsWith('-') ? '-' : ''
+  if (isNegative) cleaned = cleaned.slice(1)
+
+  const commaIdx = cleaned.indexOf(',')
+  let intPart = cleaned
+  let decPart = ''
+  if (commaIdx !== -1) {
+    intPart = cleaned.slice(0, commaIdx)
+    decPart = cleaned.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2)
+  }
+
+  const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+  let result = isNegative + formattedInt
+  if (commaIdx !== -1 || raw.endsWith(',')) {
+    result += ',' + decPart
+  }
+
+  let newCursor = result.length
+  if (relevantLen === 0) {
+    newCursor = 0
+  } else {
+    let count = 0
+    for (let i = 0; i < result.length; i++) {
+      if (/[\d,\-]/.test(result[i])) count++
+      if (count >= relevantLen) { newCursor = i + 1; break }
+    }
+  }
+
+  if (result !== getter()) {
+    setter(result)
+  }
+  requestAnimationFrame(() => {
+    if (input === document.activeElement) {
+      input.selectionStart = input.selectionEnd = newCursor
+    }
+  })
+}
 
 export default function StockModales({
   modal, cerrarModal, formMov, setFormMov, formNuevo, setFormNuevo,
@@ -53,13 +90,56 @@ export default function StockModales({
   const isGestion = ['categorias', 'proveedores'].includes(modal.tipo)
 
   const handlePrecioARSChange = (e) => {
-    const value = stripFormat(e.target.value)
-    const usdCalculado = (cotizacion > 0 && value) ? (parseFloat(value) / cotizacion).toFixed(2) : '0.00'
-    if (isEdit) {
-      setModal({ ...modal, item: { ...modal.item, precio_costo: value, precio_costo_usd: usdCalculado } })
-    } else {
-      setFormNuevo({ ...formNuevo, precio_costo: value, precio_costo_usd: usdCalculado })
+    const input = e.target
+    const cursorPos = input.selectionStart
+    const raw = e.target.value
+
+    const rawBefore = raw.slice(0, cursorPos).replace(/[^\d,\-]/g, '')
+    const relevantLen = rawBefore.length
+
+    let cleaned = raw.replace(/[^\d,\-]/g, '')
+    const isNegative = cleaned.startsWith('-') ? '-' : ''
+    if (isNegative) cleaned = cleaned.slice(1)
+
+    const commaIdx = cleaned.indexOf(',')
+    let intPart = cleaned
+    let decPart = ''
+    if (commaIdx !== -1) {
+      intPart = cleaned.slice(0, commaIdx)
+      decPart = cleaned.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2)
     }
+
+    const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+    let result = isNegative + formattedInt
+    if (commaIdx !== -1 || raw.endsWith(',')) {
+      result += ',' + decPart
+    }
+
+    const value = stripFormat(result)
+    const usdCalculado = (cotizacion > 0 && value) ? (parseFloat(value) / cotizacion).toFixed(2) : '0.00'
+
+    let newCursor = result.length
+    if (relevantLen === 0) {
+      newCursor = 0
+    } else {
+      let count = 0
+      for (let i = 0; i < result.length; i++) {
+        if (/[\d,\-]/.test(result[i])) count++
+        if (count >= relevantLen) { newCursor = i + 1; break }
+      }
+    }
+
+    if (isEdit) {
+      setModal({ ...modal, item: { ...modal.item, precio_costo: result, precio_costo_usd: usdCalculado } })
+    } else {
+      setFormNuevo({ ...formNuevo, precio_costo: result, precio_costo_usd: usdCalculado })
+    }
+
+    requestAnimationFrame(() => {
+      if (input === document.activeElement) {
+        input.selectionStart = input.selectionEnd = newCursor
+      }
+    })
   }
 
   const cancelarEdicion = () => {
@@ -204,8 +284,12 @@ export default function StockModales({
     
     setLoading(true);
     try {
+      const precioVenta = parseFloat(stripFormat(data.precio_venta || '0'))
+      const precioCosto = parseFloat(stripFormat(data.precio_costo || '0'))
+      const precioPromo = parseFloat(stripFormat(data.precio_promo || '0'))
+
       if (isNuevo) {
-        await crearProducto({ ...data, usuario_id: usuario.id });
+        await crearProducto({ ...data, precio_venta: precioVenta, precio_costo: precioCosto, precio_promo: precioPromo, usuario_id: usuario.id });
         toast('Guardado con éxito');
         await cargarStock(); 
         cerrarModal();
@@ -213,9 +297,9 @@ export default function StockModales({
         // 1. UPDATE EN SUPABASE
         const { error: errorProd } = await supabase.from('productos').update({
             nombre: data.nombre.trim(), marca: data.marca || null, modelo: data.modelo || null,
-            en_promo: Boolean(data.en_promo), precio_venta: parseFloat(data.precio_venta || 0),
-            precio_costo: parseFloat(data.precio_costo || 0), precio_costo_usd: parseFloat(data.precio_costo_usd || 0),
-            precio_promo: parseFloat(data.precio_promo || 0),
+            en_promo: Boolean(data.en_promo), precio_venta: precioVenta,
+            precio_costo: precioCosto, precio_costo_usd: parseFloat(data.precio_costo_usd || 0),
+            precio_promo: precioPromo,
             categoria_id: data.categoria_id ? parseInt(data.categoria_id) : null,
             proveedor_id: data.proveedor_id ? parseInt(data.proveedor_id) : null,
         }).eq('id', data.id);
@@ -234,8 +318,8 @@ export default function StockModales({
           WHERE id = ?
         `, [
           data.nombre.trim(), data.marca || null, data.modelo || null, data.en_promo ? 1 : 0,
-          parseFloat(data.precio_venta || 0), parseFloat(data.precio_costo || 0), 
-          parseFloat(data.precio_costo_usd || 0), parseFloat(data.precio_promo || 0),
+          precioVenta, precioCosto, 
+          parseFloat(data.precio_costo_usd || 0), precioPromo,
           data.categoria_id ? parseInt(data.categoria_id) : null, 
           data.proveedor_id ? parseInt(data.proveedor_id) : null, 
           parseInt(data.stock_l1 || 0), parseInt(data.stock_l2 || 0), data.id
@@ -341,13 +425,11 @@ export default function StockModales({
                       type="text"
                       inputMode="decimal"
                       placeholder="Ej: 5.500,00"
-                      value={formatPesos(isEdit ? modal.item.precio_promo : formNuevo.precio_promo)} 
-                      onChange={e => {
-                        const raw = stripFormat(e.target.value)
-                        if (raw === '' || /^\d+(\.\d{0,2})?$/.test(raw)) {
-                          isEdit ? setModal({...modal, item: {...modal.item, precio_promo: raw}}) : setFormNuevo({...formNuevo, precio_promo: raw})
-                        }
-                      }} 
+                      value={fmtInitial(isEdit ? modal.item.precio_promo : formNuevo.precio_promo)} 
+                      onChange={makePriceHandler(
+                        (val) => isEdit ? setModal({...modal, item: {...modal.item, precio_promo: val}}) : setFormNuevo({...formNuevo, precio_promo: val}),
+                        () => isEdit ? modal.item.precio_promo : formNuevo.precio_promo
+                      )}
                       style={{ width: '100%', padding: 10, border: '2px solid #fbc02d', borderRadius: 8, fontSize: 16, fontWeight: 800, color: '#000' }} 
                     />
                   </div>
@@ -368,7 +450,7 @@ export default function StockModales({
               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: 10, alignItems: 'end' }}>
                 <div>
                   <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Costo ARS</label>
-                  <input type="text" inputMode="decimal" value={formatPesos(isEdit ? modal.item.precio_costo : formNuevo.precio_costo)} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
+                  <input type="text" inputMode="decimal" value={fmtInitial(isEdit ? modal.item.precio_costo : formNuevo.precio_costo)} onChange={handlePrecioARSChange} style={{ width: '100%', padding: 12, border: '1px solid #ccc', borderRadius: 8, color: '#000', fontWeight: 700, fontSize: 16 }} />
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ background: '#f4f4f4', padding: '10px', borderRadius: 8, border: '1px solid #eee', textAlign: 'center' }}>
@@ -378,7 +460,7 @@ export default function StockModales({
                   <div style={{ background: '#e8f5e9', padding: '10px', borderRadius: 8, border: '1px solid #66bb6a', textAlign: 'center' }}>
                     <div style={{ fontSize: 9, fontWeight: 700, color: '#2e7d32' }}>CON EL 100%</div>
                     <div style={{ fontSize: 18, fontWeight: 900, color: '#1b5e20' }}>
-                      {formatPesos(String((isEdit ? Number(modal.item.precio_costo || 0) : Number(formNuevo.precio_costo || 0)) * 2))}
+                      {fmtInitial(String((isEdit ? Number(stripFormat(modal.item.precio_costo || '0')) : Number(stripFormat(formNuevo.precio_costo || '0'))) * 2))}
                     </div>
                   </div>
                 </div>
@@ -386,12 +468,10 @@ export default function StockModales({
 
               <div>
                 <label style={{ fontWeight: 700, fontSize: 11, color: '#666', marginBottom: 3, display: 'block' }}>Venta Final ARS (Normal)</label>
-                <input type="text" inputMode="decimal" value={formatPesos(isEdit ? modal.item.precio_venta : formNuevo.precio_venta)} onChange={e => {
-                  const raw = stripFormat(e.target.value)
-                  if (raw === '' || /^\d+(\.\d{0,2})?$/.test(raw)) {
-                    isEdit ? setModal({...modal, item: {...modal.item, precio_venta: raw}}) : setFormNuevo({...formNuevo, precio_venta: raw})
-                  }
-                }} style={{ width: '100%', padding: 12, border: '1px solid #2e7d32', borderRadius: 8, fontSize: 18, fontWeight: 800, color: '#000' }} />
+                <input type="text" inputMode="decimal" value={fmtInitial(isEdit ? modal.item.precio_venta : formNuevo.precio_venta)} onChange={makePriceHandler(
+                  (val) => isEdit ? setModal({...modal, item: {...modal.item, precio_venta: val}}) : setFormNuevo({...formNuevo, precio_venta: val}),
+                  () => isEdit ? modal.item.precio_venta : formNuevo.precio_venta
+                )} style={{ width: '100%', padding: 12, border: '1px solid #2e7d32', borderRadius: 8, fontSize: 18, fontWeight: 800, color: '#000' }} />
               </div>
 
               

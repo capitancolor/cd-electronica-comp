@@ -167,7 +167,7 @@ async function cargarDatos() {
       toast(data.id ? "Gasto actualizado" : "Gasto registrado")
       cerrarModal()
       cargarDatos()
-    } catch (err) { toast("Error al procesar", "error") } finally { setLoading(false) }
+    } catch (err) { console.error("Error guardando gasto:", err); toast("Error: " + (err.message || err), "error") } finally { setLoading(false) }
   }
 
   const handleEliminar = async () => {

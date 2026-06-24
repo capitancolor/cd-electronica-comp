@@ -146,6 +146,7 @@ export default function Reportes({ usuario, config }) {
   const [editandoVenta, setEditandoVenta] = useState(null);
   const [editItems, setEditItems] = useState([]);
   const [editSaving, setEditSaving] = useState(false);
+  const [editFecha, setEditFecha] = useState('');
   const [busquedaProd, setBusquedaProd] = useState('');
   const [resultadosProd, setResultadosProd] = useState([]);
   const [buscandoProd, setBuscandoProd] = useState(false);
@@ -454,9 +455,10 @@ export default function Reportes({ usuario, config }) {
             <td style={{ padding: '0 10px', textAlign: 'center' }}>
               <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
                 <button 
-                  onClick={(e) => {
+                    onClick={(e) => {
                     e.stopPropagation();
                     setEditandoVenta(v);
+                    setEditFecha(v.fecha ? new Date(v.fecha).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
                     setEditItems((v.venta_items || []).map(it => ({ ...it, producto_id: it.producto_id || it.productos?.id, nombre: it.productos?.nombre || it.descripcion })));
                   }}
                   style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
@@ -614,9 +616,15 @@ export default function Reportes({ usuario, config }) {
       <div className="row-between" style={{ marginBottom: 16, borderBottom: `1px solid ${UI.divider}`, paddingBottom: 12 }}>
         <div className="col">
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>EDITAR VENTA</h3>
-          <span style={{ fontSize: 11, color: UI.pageMuted }}>
-            {new Date(editandoVenta.fecha).toLocaleString('es-AR')} — {editandoVenta.local_nombre}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+            <input
+              type="date"
+              value={editFecha}
+              onChange={e => setEditFecha(e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 12, width: 'auto' }}
+            />
+            <span style={{ fontSize: 11, color: UI.pageMuted }}>— {editandoVenta.local_nombre}</span>
+          </div>
         </div>
         <button onClick={() => { if (!editSaving) setEditandoVenta(null) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: UI.pageMuted }}>
           <Icon name="x" size={20} />
@@ -748,7 +756,8 @@ export default function Reportes({ usuario, config }) {
                 items: itemsValidos,
                 localId: editandoVenta.local_id,
                 usuarioId: usuario.id,
-                metodoPago: editandoVenta.metodo_pago
+                metodoPago: editandoVenta.metodo_pago,
+                fecha: editFecha
               });
               setEditSaving(false);
               if (res.ok) {

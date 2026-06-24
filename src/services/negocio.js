@@ -934,11 +934,17 @@ export async function eliminarVenta(id) {
     }
 }
 
-export async function actualizarVenta({ ventaId, items, localId, usuarioId, metodoPago }) {
+export async function actualizarVenta({ ventaId, items, localId, usuarioId, metodoPago, fecha }) {
   const db = await Database.load("sqlite:cd_electronica.db");
 
   if (!window.navigator.onLine) {
     return { ok: false, msg: "No podés editar ventas sin conexión." };
+  }
+
+  // Convertir fecha de date input (YYYY-MM-DD) a timestamp ISO local
+  if (fecha && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    const [y, m, d] = fecha.split('-');
+    fecha = new Date(Number(y), Number(m) - 1, Number(d)).toISOString();
   }
 
   try {
@@ -1022,7 +1028,7 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
 
     // 4. Actualizar total de la venta
     const { error: errUpdate } = await supabase.from('ventas')
-      .update({ total: newTotal, metodo_pago: metodoPago || venta.metodo_pago })
+      .update({ total: newTotal, metodo_pago: metodoPago || venta.metodo_pago, ...(fecha ? { fecha } : {}) })
       .eq('id', ventaId);
     if (errUpdate) throw errUpdate;
 
@@ -1034,9 +1040,16 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
         [ventaId, it.producto_id, it.nombre || it.descripcion || "Producto", it.cantidad, it.precio_unitario]
       );
     }
+    const updateParts = ['total = ?', 'productos_nombres = ?'];
+    const updateParams = [newTotal, items.map(i => i.nombre || i.descripcion).filter(Boolean).join(', ')];
+    if (fecha) {
+      updateParts.push('fecha = ?');
+      updateParams.push(fecha);
+    }
+    updateParams.push(ventaId);
     await db.execute(
-      `UPDATE ventas SET total = ?, productos_nombres = ? WHERE id = ?`,
-      [newTotal, items.map(i => i.nombre || i.descripcion).filter(Boolean).join(', '), ventaId]
+      `UPDATE ventas SET ${updateParts.join(', ')} WHERE id = ?`,
+      updateParams
     );
 
     return { ok: true };
@@ -1093,22 +1106,21 @@ export async function getGastos(desde, hasta) {
 
 export async function registrarGasto(gasto) {
   const db = await Database.load("sqlite:cd_electronica.db");
-  const payload = {
+  const supabasePayload = {
     fecha: gasto.fecha, 
     descripcion: (gasto.descripcion || 'GASTO SIN DESCRIPCIÓN').toUpperCase(),
     monto: parseFloat(gasto.monto || 0),
     categoria: gasto.categoria || 'VARIOS',
     local_id: gasto.local_id ? parseInt(gasto.local_id) : null,
     usuario_id: gasto.usuario_id ? parseInt(gasto.usuario_id) : null,
-    metodo_pago: gasto.metodo_pago || 'efectivo',
-    sincronizado: 1 
   };
+  const metodoPago = gasto.metodo_pago || 'efectivo';
   const diasAplicados = gasto.dias_aplicados?.length > 0 ? JSON.stringify(gasto.dias_aplicados) : null;
 
   const guardarGastoOffline = async () => {
     await db.execute(
       "INSERT INTO gastos_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify({ ...payload, dias_aplicados: gasto.dias_aplicados }), new Date().toISOString()]
+      [JSON.stringify({ ...supabasePayload, metodo_pago: metodoPago, dias_aplicados: gasto.dias_aplicados, sincronizado: 1 }), new Date().toISOString()]
     );
     return { offline: true };
   };
@@ -1116,14 +1128,14 @@ export async function registrarGasto(gasto) {
   if (!window.navigator.onLine) return await guardarGastoOffline();
 
   try {
-    const { data, error } = await supabase.from('gastos').insert([payload]).select().single();
+    const { data, error } = await supabase.from('gastos').insert([supabasePayload]).select().single();
     if (error) throw error;
     const g = data;
     await db.execute(
       "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados, payload.metodo_pago]
+      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados, metodoPago]
     );
-    return { ...g, dias_aplicados: gasto.dias_aplicados, metodo_pago: payload.metodo_pago };
+    return { ...g, dias_aplicados: gasto.dias_aplicados, metodo_pago: metodoPago };
   } catch (error) {
     if (checkOfflineError(error)) return await guardarGastoOffline();
     throw error;
@@ -1131,22 +1143,22 @@ export async function registrarGasto(gasto) {
 }
 
 export async function actualizarGasto(id, cambios) {
-  const payload = {
+  const supabasePayload = {
     fecha: cambios.fecha,
     descripcion: cambios.descripcion?.toUpperCase(),
     monto: parseFloat(cambios.monto),
     categoria: cambios.categoria,
     local_id: cambios.local_id ? parseInt(cambios.local_id) : null,
     usuario_id: cambios.usuario_id ? parseInt(cambios.usuario_id) : null,
-    metodo_pago: cambios.metodo_pago || 'efectivo'
   };
+  const metodoPago = cambios.metodo_pago || 'efectivo';
   const diasAplicados = cambios.dias_aplicados?.length > 0 ? JSON.stringify(cambios.dias_aplicados) : null;
-  const { error } = await supabase.from('gastos').update(payload).eq('id', id);
+  const { error } = await supabase.from('gastos').update(supabasePayload).eq('id', id);
   if (error) throw error;
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute(
     "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, metodo_pago = ?, dias_aplicados = ? WHERE id = ?",
-    [payload.fecha, payload.descripcion, payload.monto, payload.categoria, payload.local_id, payload.usuario_id, payload.metodo_pago, diasAplicados, id]
+    [supabasePayload.fecha, supabasePayload.descripcion, supabasePayload.monto, supabasePayload.categoria, supabasePayload.local_id, supabasePayload.usuario_id, metodoPago, diasAplicados, id]
   );
 }
 
@@ -1266,7 +1278,7 @@ TRABAJO: ${reparacion.arreglo || ''}
     INSERT OR REPLACE INTO reparaciones (
       id, cliente, equipo, problema, estado, precio, costo, fecha, tecnico_id,
       marca, modelo, telefono, accesorios, arreglo, repuestos, cobrado
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, payload.cliente, payload.equipo, payload.problema, payload.estado, payload.precio, payload.costo, payload.fecha, payload.tecnico_id,
      reparacion.marca || '', reparacion.modelo || '', reparacion.telefono || '', reparacion.accesorios || '', reparacion.arreglo || '',
      repuestosJson, reparacion.cobrado ? 1 : 0]
@@ -2315,14 +2327,15 @@ export async function getReparacionesSinCobrar(busqueda = '') {
   });
 }
 
-export async function registrarPagoReparacion({ reparacionId, localId, usuarioId, metodoPago }) {
+export async function registrarPagoReparacion({ reparacionId, localId, usuarioId, metodoPago, totalFinal: totalFinalParam, detalleMixto: detalleMixtoParam }) {
   const db = await Database.load("sqlite:cd_electronica.db");
 
   const [reparacion] = await db.select("SELECT * FROM reparaciones WHERE id = ?", [reparacionId]);
   if (!reparacion) throw new Error("Reparación no encontrada");
 
   const repuestos = reparacion.repuestos ? JSON.parse(reparacion.repuestos) : [];
-  const total = reparacion.precio || reparacion.costo || 0;
+  const totalBase = reparacion.precio || reparacion.costo || 0;
+  const totalFinal = totalFinalParam ?? totalBase;
 
   const itemsRepuesto = repuestos.map(r => ({
     producto_id: r.producto_id,
@@ -2337,13 +2350,17 @@ export async function registrarPagoReparacion({ reparacionId, localId, usuarioId
   const itemReparacion = {
     producto_id: null,
     nombre: descripcion,
-    precio_unitario: total,
+    precio_unitario: totalBase,
     cantidad: 1,
     es_manual: true,
     precio_costo: 0
   };
 
   const items = [itemReparacion, ...itemsRepuesto];
+
+  const detalleMixto = metodoPago === 'mixto'
+    ? { ...(detalleMixtoParam || {}), es_reparacion: true, costo_reparacion: reparacion.costo || 0 }
+    : { es_reparacion: true, costo_reparacion: reparacion.costo || 0 };
 
   // Marcar reparación como cobrada en local ANTES de registrarVenta
   // (para que si el stock se descuente offline, quede registrado)
@@ -2354,8 +2371,8 @@ export async function registrarPagoReparacion({ reparacionId, localId, usuarioId
     usuarioId,
     items,
     metodoPago,
-    totalFinal: total,
-    detalleMixto: { es_reparacion: true, costo_reparacion: reparacion.costo || 0 },
+    totalFinal,
+    detalleMixto,
     reparacion_id: reparacionId
   });
 

@@ -30,6 +30,7 @@ export default function Reparaciones({ usuario, config }) {
   const [cobrarReparacion, setCobrarReparacion] = useState(null)
   const [metodoPagoCobro, setMetodoPagoCobro] = useState('efectivo')
   const [cobrando, setCobrando] = useState(false)
+  const [mixtoDataRep, setMixtoDataRep] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
   const priceRef = useRef(null)
 
   useEffect(() => {
@@ -241,6 +242,15 @@ export default function Reparaciones({ usuario, config }) {
       }
     });
   };
+
+  const totalBaseCobro = Number(cobrarReparacion?.total || 0)
+  const nEfectivoRep = Number(mixtoDataRep.efectivo) || 0
+  const nTarjetaRep = Number(mixtoDataRep.tarjeta) || 0
+  const nTransferenciaRep = Number(mixtoDataRep.transferencia) || 0
+  const recargoTarjetaCobro = metodoPagoCobro === 'tarjeta' ? totalBaseCobro * 0.10 : (metodoPagoCobro === 'mixto' ? nTarjetaRep * 0.10 : 0)
+  const totalFinalCobro = totalBaseCobro + recargoTarjetaCobro
+  const totalIngresadoRep = nEfectivoRep + nTarjetaRep + nTransferenciaRep
+  const faltaCubrirRep = totalBaseCobro - totalIngresadoRep
 
   const handleCambiarEstado = async (id, nuevoEstado) => {
     if (!nuevoEstado) return
@@ -530,10 +540,10 @@ export default function Reparaciones({ usuario, config }) {
       {/* MODAL COBRAR REPARACIÓN */}
       {showCobrarModal && cobrarReparacion && (
         <div style={styles.overlay}>
-          <div style={{ ...styles.modalContent, width: 500 }}>
+          <div style={{ ...styles.modalContent, width: 550 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20 }}>
               <h3 style={{ margin: 0, fontWeight: 900, color: UI.accent }}>COBRAR REPARACIÓN</h3>
-              <button onClick={() => { setShowCobrarModal(false); setCobrarReparacion(null); }} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer' }}>✕</button>
+              <button onClick={() => { setShowCobrarModal(false); setCobrarReparacion(null); setMixtoDataRep({ efectivo: '', tarjeta: '', transferencia: '' }); }} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer' }}>✕</button>
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
@@ -562,44 +572,90 @@ export default function Reparaciones({ usuario, config }) {
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb', padding: 15, borderRadius: 10 }}>
+                <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>SUBTOTAL:</span>
+                <span style={{ fontWeight: 900, fontSize: 24, color: '#374151' }}>
+                  ${totalBaseCobro.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+
+              {recargoTarjetaCobro > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 15px' }}>
+                  <span style={{ fontWeight: 700, fontSize: 14, color: '#dc2626' }}>Recargo tarjeta (10%):</span>
+                  <span style={{ fontWeight: 900, fontSize: 18, color: '#dc2626' }}>
+                    +${recargoTarjetaCobro.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f0fdf4', padding: 15, borderRadius: 10, border: '1px solid #bbf7d0' }}>
                 <span style={{ fontWeight: 800, fontSize: 16, color: '#374151' }}>TOTAL A COBRAR:</span>
                 <span style={{ fontWeight: 900, fontSize: 28, color: '#16a34a' }}>
-                  ${Number(cobrarReparacion.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  ${totalFinalCobro.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
 
               <div>
                 <label style={{ fontSize: 12, fontWeight: 700, color: '#666', marginBottom: 5, display: 'block' }}>MÉTODO DE PAGO</label>
-                <select value={metodoPagoCobro} onChange={e => setMetodoPagoCobro(e.target.value)} style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 700 }}>
+                <select value={metodoPagoCobro} onChange={e => { setMetodoPagoCobro(e.target.value); setMixtoDataRep({ efectivo: '', tarjeta: '', transferencia: '' }); }} style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 700 }}>
                   <option value="efectivo">💵 Efectivo</option>
                   <option value="tarjeta">💳 Tarjeta (+10%)</option>
                   <option value="transferencia">🏦 Transferencia</option>
+                  <option value="mixto">🔀 Pago Mixto</option>
                 </select>
               </div>
 
+              {metodoPagoCobro === 'mixto' && (
+                <div style={{ display: 'flex', gap: 8, background: '#f8fafc', padding: 12, borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontSize: 9, fontWeight: 900, display: 'block', color: '#666' }}>EFECTIVO</span>
+                    <input type="number" value={mixtoDataRep.efectivo} onChange={e => setMixtoDataRep({ ...mixtoDataRep, efectivo: e.target.value })}
+                      style={{ width: '100%', height: 35, borderRadius: 6, border: '1px solid #ccc', padding: '0 8px', fontWeight: 700 }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontSize: 9, fontWeight: 900, display: 'block', color: '#666' }}>TARJETA</span>
+                    <input type="number" value={mixtoDataRep.tarjeta} onChange={e => setMixtoDataRep({ ...mixtoDataRep, tarjeta: e.target.value })}
+                      style={{ width: '100%', height: 35, borderRadius: 6, border: '1px solid #ccc', padding: '0 8px', fontWeight: 700 }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontSize: 9, fontWeight: 900, display: 'block', color: '#666' }}>TRANSF.</span>
+                    <input type="number" value={mixtoDataRep.transferencia} onChange={e => setMixtoDataRep({ ...mixtoDataRep, transferencia: e.target.value })}
+                      style={{ width: '100%', height: 35, borderRadius: 6, border: '1px solid #ccc', padding: '0 8px', fontWeight: 700 }} />
+                  </div>
+                </div>
+              )}
+              {metodoPagoCobro === 'mixto' && faltaCubrirRep > 0 && (
+                <div style={{ textAlign: 'center', color: '#dc2626', fontWeight: 700, fontSize: 13 }}>
+                  FALTAN: ${faltaCubrirRep.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              )}
+
               <button onClick={async () => {
+                if (metodoPagoCobro === 'mixto' && faltaCubrirRep > 0) return toast('Completá los montos del pago mixto', 'error');
                 setCobrando(true);
                 try {
                   const res = await registrarPagoReparacion({
                     reparacionId: cobrarReparacion.id,
                     localId: config?.local_id || 1,
                     usuarioId: usuario?.id,
-                    metodoPago: metodoPagoCobro
+                    metodoPago: metodoPagoCobro,
+                    totalFinal: totalFinalCobro,
+                    detalleMixto: metodoPagoCobro === 'mixto' ? mixtoDataRep : undefined
                   });
                   toast('Reparación cobrada correctamente');
                   setShowCobrarModal(false);
                   setCobrarReparacion(null);
+                  setMixtoDataRep({ efectivo: '', tarjeta: '', transferencia: '' });
                   await cargar();
                 } catch (err) {
                   toast(err.message, 'error');
                 } finally {
                   setCobrando(false);
                 }
-              }} disabled={cobrando} style={{
+              }} disabled={cobrando || (metodoPagoCobro === 'mixto' && faltaCubrirRep > 0)} style={{
                 background: UI.accent, color: '#fff', border: 'none', borderRadius: 8,
                 padding: 14, fontWeight: 800, cursor: cobrando ? 'not-allowed' : 'pointer', fontSize: 16
               }}>
-                {cobrando ? 'PROCESANDO...' : `COBRAR ${Number(cobrarReparacion.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                {cobrando ? 'PROCESANDO...' : `COBRAR ${totalFinalCobro.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </button>
             </div>
           </div>
