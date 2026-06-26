@@ -292,8 +292,8 @@ export default function Reportes({ usuario, config }) {
     })
   }, [ventas, filtroMetodo, filtroCategoria, sortConfig, busquedaTexto])
 
-  const totalPeriodo = ventas.reduce((s, v) => s + Number(v.total || 0), 0)
-  const gananciaTotal = ventas.reduce((acc, v) => {
+  const totalPeriodo = listaAMostrar.reduce((s, v) => s + Number(v.total || 0), 0)
+  const gananciaTotal = listaAMostrar.reduce((acc, v) => {
     const base = Number(v.total || 0) - Number(v.costo_total || 0);
     const recargaExtra = (v.venta_items || [])
       .filter(i => !i.producto_id && i.descripcion?.startsWith('RECARGA'))
@@ -303,13 +303,13 @@ export default function Reportes({ usuario, config }) {
       .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
     return acc + base - recargaExtra - notaDebito;
   }, 0)
-  const costoTotalPeriodo = ventas.reduce((s, v) => s + Number(v.costo_total || 0), 0)
-  const efectivoTotal = ventas.reduce((s, v) => {
+  const costoTotalPeriodo = listaAMostrar.reduce((s, v) => s + Number(v.costo_total || 0), 0)
+  const efectivoTotal = listaAMostrar.reduce((s, v) => {
     if (v.metodo_pago === 'efectivo') return s + Number(v.total || 0)
     if (v.metodo_pago === 'mixto') return s + Number(v.detalle_mixto?.efectivo || 0)
     return s
   }, 0)
-  const tarjetaTransferenciaTotal = ventas.reduce((s, v) => {
+  const tarjetaTransferenciaTotal = listaAMostrar.reduce((s, v) => {
     if (v.metodo_pago === 'tarjeta') return s + Number(v.total || 0)
     if (v.metodo_pago === 'transferencia') return s + Number(v.total || 0)
     if (v.metodo_pago === 'mixto') {
@@ -319,7 +319,7 @@ export default function Reportes({ usuario, config }) {
   }, 0)
   
   // NUEVO CÁLCULO: Cantidad de artículos vendidos (suma de cantidades en venta_items)
-  const articulosVendidos = ventas.reduce((acc, v) => {
+  const articulosVendidos = listaAMostrar.reduce((acc, v) => {
     const cantVenta = v.venta_items?.reduce((sum, item) => sum + (Number(item.cantidad) || 0), 0) || 0;
     return acc + cantVenta;
   }, 0);
@@ -459,7 +459,7 @@ export default function Reportes({ usuario, config }) {
                     e.stopPropagation();
                     setEditandoVenta(v);
                     setEditFecha(v.fecha ? new Date(v.fecha).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
-                    setEditItems((v.venta_items || []).map(it => ({ ...it, producto_id: it.producto_id || it.productos?.id, nombre: it.productos?.nombre || it.descripcion })));
+                    setEditItems((v.venta_items || []).map(it => ({ ...it, producto_id: it.producto_id || it.productos?.id, nombre: it.productos?.nombre || it.descripcion, marca: it.productos?.marca || '', modelo: it.productos?.modelo || '' })));
                   }}
                   style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
@@ -659,6 +659,8 @@ export default function Reportes({ usuario, config }) {
                     setEditItems(prev => [...prev, {
                       producto_id: p.id,
                       nombre: p.nombre,
+                      marca: p.marca || '',
+                      modelo: p.modelo || '',
                       cantidad: 1,
                       precio_unitario: Number(p.precio_venta || 0),
                       descripcion: p.nombre,
@@ -671,7 +673,12 @@ export default function Reportes({ usuario, config }) {
                   onMouseOver={e => e.currentTarget.style.background = '#f3f4f6'}
                   onMouseOut={e => e.currentTarget.style.background = '#fff'}
                 >
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>{p.nombre}</span>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{p.nombre}</span>
+                    {(p.marca || p.modelo) && (
+                      <span style={{ fontSize: 11, color: '#666', marginLeft: 8 }}>{[p.marca, p.modelo].filter(Boolean).join(' - ')}</span>
+                    )}
+                  </div>
                   <span style={{ fontSize: 12, color: '#2563eb', fontWeight: 700 }}>{fmt(p.precio_venta)}</span>
                 </div>
               ))}
@@ -689,7 +696,12 @@ export default function Reportes({ usuario, config }) {
             border: '1px solid #e2e8f0',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
-              <span style={{ fontSize: 13, fontWeight: 800, color: '#111827', flex: 1 }}>{item.nombre}</span>
+              <div style={{ flex: 1 }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: '#111827', display: 'block' }}>{item.nombre}</span>
+                {(item.marca || item.modelo) && (
+                  <span style={{ fontSize: 11, color: '#666' }}>{[item.marca, item.modelo].filter(Boolean).join(' - ')}</span>
+                )}
+              </div>
               <button
                 onClick={() => setEditItems(prev => prev.filter((_, idx) => idx !== i))}
                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: 4, flexShrink: 0 }}

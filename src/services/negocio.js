@@ -1325,9 +1325,9 @@ export async function getClientes(busqueda = '') {
         localStorage.setItem('cd_clientes_cache', JSON.stringify(data));
         for (const c of data) {
           await db.execute(
-            `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [c.id, c.nombre, c.cuit, c.telefono, c.email, c.direccion, c.razon_social, c.alias, c.nro_cuenta, c.condicion_iva]
+            `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva, fecha_creacion)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [c.id, c.nombre, c.cuit, c.telefono, c.email, c.direccion, c.razon_social, c.alias, c.nro_cuenta, c.condicion_iva, c.fecha_creacion]
           );
         }
       }
@@ -1362,14 +1362,15 @@ export async function guardarCliente(cliente) {
     razon_social: cliente.razon_social || null,
     alias: cliente.alias || null,
     nro_cuenta: cliente.nro_cuenta || null,
-    condicion_iva: cliente.condicion_iva || 'Consumidor Final'
+    condicion_iva: cliente.condicion_iva || 'Consumidor Final',
+    fecha_creacion: cliente.fecha_creacion || new Date().toISOString()
   };
 
   // 1. Guardar primero en SQLite local (siempre funciona)
   await db.execute(
-    `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [payload.id, payload.nombre, payload.cuit, payload.telefono, payload.email, payload.direccion, payload.razon_social, payload.alias, payload.nro_cuenta, payload.condicion_iva]
+    `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva, fecha_creacion)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [payload.id, payload.nombre, payload.cuit, payload.telefono, payload.email, payload.direccion, payload.razon_social, payload.alias, payload.nro_cuenta, payload.condicion_iva, payload.fecha_creacion]
   );
 
   // 2. Intentar en Supabase (si falla, el local ya quedó guardado)
@@ -1594,9 +1595,9 @@ export async function procesarClientesPendientes() {
                 
                 if (!error && data) {
                     await db.execute(
-                        `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                        [data.id, data.nombre, data.cuit, data.telefono, data.email, data.direccion, data.razon_social, data.alias, data.nro_cuenta, data.condicion_iva]
+                        `INSERT OR REPLACE INTO clientes (id, nombre, cuit, telefono, email, direccion, razon_social, alias, nro_cuenta, condicion_iva, fecha_creacion)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [data.id, data.nombre, data.cuit, data.telefono, data.email, data.direccion, data.razon_social, data.alias, data.nro_cuenta, data.condicion_iva, data.fecha_creacion]
                     );
                     await db.execute("DELETE FROM clientes_pendientes WHERE id = ?", [row.id]);
                     console.log(`Cliente pendiente ID ${row.id} sincronizado.`);
@@ -1740,9 +1741,15 @@ export async function sincronizarReparacionesMaestras() {
                 // 2. Si no hay conflicto, actualizamos nuestro espejo local
                 await db.execute(
                     `INSERT OR REPLACE INTO reparaciones 
-                    (id, cliente, equipo, problema, estado, costo, fecha, repuestos, cobrado) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [r.id, r.cliente, r.equipo, r.problema, r.estado, r.costo, r.fecha, r.repuestos || null, r.cobrado ? 1 : 0]
+                    (id, cliente, equipo, problema, estado, precio, costo, fecha, tecnico_id,
+                     marca, modelo, telefono, accesorios, arreglo, repuestos, cobrado) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [r.id, r.cliente, r.equipo, r.problema, r.estado,
+                     r.precio || 0, r.costo || 0, r.fecha,
+                     r.tecnico_id || null,
+                     r.marca || '', r.modelo || '', r.telefono || '',
+                     r.accesorios || '', r.arreglo || '',
+                     r.repuestos || null, r.cobrado ? 1 : 0]
                 );
             }
         }
@@ -2088,6 +2095,19 @@ export async function sincronizarTablasMaestras() {
             }
         }
 
+        // 2c. Sincronizar Técnicos
+        const { data: tecs, error: errTecs } = await supabase.from('tecnicos').select('*').order('nombre', { ascending: true });
+        if (errTecs) throw errTecs;
+        if (tecs) {
+            await db.execute("DELETE FROM tecnicos");
+            for (const t of tecs) {
+                await db.execute(
+                    "INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)",
+                    [t.id, t.nombre, t.telefono || null, t.especialidad || null]
+                );
+            }
+        }
+
         // 3. Sincronizar Productos (mapeando tipos de datos)
         const { data: prods, error: errProds } = await supabase.from('productos')
             .select('*, stock(local_id, cantidad)')
@@ -2267,6 +2287,24 @@ export async function procesarVentasPendientes() {
  */
 export async function getTecnicos() {
   const db = await Database.load("sqlite:cd_electronica.db");
+
+  // Sincronizar desde Supabase a SQLite local si hay conexión
+  if (window.navigator.onLine) {
+    try {
+      const { data, error } = await supabase.from('tecnicos').select('*').order('nombre', { ascending: true });
+      if (!error && data) {
+        for (const t of data) {
+          await db.execute(
+            `INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)`,
+            [t.id, t.nombre, t.telefono || null, t.especialidad || null]
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("Supabase no disponible para técnicos:", e.message);
+    }
+  }
+
   return await db.select("SELECT * FROM tecnicos ORDER BY nombre");
 }
 
