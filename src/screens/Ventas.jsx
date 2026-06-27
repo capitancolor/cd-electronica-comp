@@ -994,7 +994,7 @@ async function confirmarVentaFinal() {
           id: `RECARGA-${Date.now()}`,
           nombre: `RECARGA $${monto.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
           precio_venta: monto,
-          precio_costo: 0,
+          precio_costo: monto * 0.9,
           stockActual: 9999,
           esRecarga: true,
           esManual: true,

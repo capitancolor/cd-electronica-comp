@@ -1068,20 +1068,32 @@ export async function getGastos(desde, hasta) {
     if (error) throw error;
     if (data) {
       const db = await Database.load("sqlite:cd_electronica.db");
-      // Respaldar dias_aplicados locales antes de que el sync los pise
-      const locales = await db.select("SELECT id, dias_aplicados FROM gastos WHERE dias_aplicados IS NOT NULL");
-      const mapa = {};
-      for (const l of locales) mapa[l.id] = l.dias_aplicados;
+      // Respaldar datos locales antes de que el sync los pise
+      const locales = await db.select("SELECT id, dias_aplicados, metodo_pago, fecha_ingreso FROM gastos WHERE dias_aplicados IS NOT NULL OR metodo_pago IS NOT NULL OR fecha_ingreso IS NOT NULL");
+      const mapaDias = {}, mapaPago = {}, mapaIngreso = {};
+      for (const l of locales) {
+        if (l.dias_aplicados) mapaDias[l.id] = l.dias_aplicados;
+        if (l.metodo_pago) mapaPago[l.id] = l.metodo_pago;
+        if (l.fecha_ingreso) mapaIngreso[l.id] = l.fecha_ingreso;
+      }
       // Sync desde Supabase
       for (const g of data) {
         await db.execute(
           "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, metodo_pago, sincronizado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
-          [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, g.metodo_pago || 'efectivo']
+          [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, g.metodo_pago || 'efectivo', 1]
         );
-        // Restaurar dias_aplicados si existían localmente
-        if (mapa[g.id]) {
-          await db.execute("UPDATE gastos SET dias_aplicados = ? WHERE id = ?", [mapa[g.id], g.id]);
-          g.dias_aplicados = JSON.parse(mapa[g.id]);
+        // Restaurar datos que solo existen localmente
+        if (mapaDias[g.id]) {
+          await db.execute("UPDATE gastos SET dias_aplicados = ? WHERE id = ?", [mapaDias[g.id], g.id]);
+          g.dias_aplicados = JSON.parse(mapaDias[g.id]);
+        }
+        if (mapaPago[g.id]) {
+          await db.execute("UPDATE gastos SET metodo_pago = ? WHERE id = ?", [mapaPago[g.id], g.id]);
+          g.metodo_pago = mapaPago[g.id];
+        }
+        if (mapaIngreso[g.id]) {
+          await db.execute("UPDATE gastos SET fecha_ingreso = ? WHERE id = ?", [mapaIngreso[g.id], g.id]);
+          g.fecha_ingreso = mapaIngreso[g.id];
         }
       }
     }
@@ -1115,12 +1127,13 @@ export async function registrarGasto(gasto) {
     usuario_id: gasto.usuario_id ? parseInt(gasto.usuario_id) : null,
   };
   const metodoPago = gasto.metodo_pago || 'efectivo';
+  const fechaIngreso = gasto.fecha_ingreso || new Date().toISOString();
   const diasAplicados = gasto.dias_aplicados?.length > 0 ? JSON.stringify(gasto.dias_aplicados) : null;
 
   const guardarGastoOffline = async () => {
     await db.execute(
       "INSERT INTO gastos_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify({ ...supabasePayload, metodo_pago: metodoPago, dias_aplicados: gasto.dias_aplicados, sincronizado: 1 }), new Date().toISOString()]
+      [JSON.stringify({ ...supabasePayload, metodo_pago: metodoPago, fecha_ingreso: fechaIngreso, dias_aplicados: gasto.dias_aplicados, sincronizado: 1 }), new Date().toISOString()]
     );
     return { offline: true };
   };
@@ -1132,10 +1145,10 @@ export async function registrarGasto(gasto) {
     if (error) throw error;
     const g = data;
     await db.execute(
-      "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados, metodo_pago) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados, metodoPago]
+      "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados, metodo_pago, fecha_ingreso) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados, metodoPago, fechaIngreso]
     );
-    return { ...g, dias_aplicados: gasto.dias_aplicados, metodo_pago: metodoPago };
+    return { ...g, dias_aplicados: gasto.dias_aplicados, metodo_pago: metodoPago, fecha_ingreso: fechaIngreso };
   } catch (error) {
     if (checkOfflineError(error)) return await guardarGastoOffline();
     throw error;
@@ -1152,13 +1165,14 @@ export async function actualizarGasto(id, cambios) {
     usuario_id: cambios.usuario_id ? parseInt(cambios.usuario_id) : null,
   };
   const metodoPago = cambios.metodo_pago || 'efectivo';
+  const fechaIngreso = cambios.fecha_ingreso || null;
   const diasAplicados = cambios.dias_aplicados?.length > 0 ? JSON.stringify(cambios.dias_aplicados) : null;
   const { error } = await supabase.from('gastos').update(supabasePayload).eq('id', id);
   if (error) throw error;
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute(
-    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, metodo_pago = ?, dias_aplicados = ? WHERE id = ?",
-    [supabasePayload.fecha, supabasePayload.descripcion, supabasePayload.monto, supabasePayload.categoria, supabasePayload.local_id, supabasePayload.usuario_id, metodoPago, diasAplicados, id]
+    "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, metodo_pago = ?, dias_aplicados = ?, fecha_ingreso = ? WHERE id = ?",
+    [supabasePayload.fecha, supabasePayload.descripcion, supabasePayload.monto, supabasePayload.categoria, supabasePayload.local_id, supabasePayload.usuario_id, metodoPago, diasAplicados, fechaIngreso, id]
   );
 }
 
@@ -1571,7 +1585,9 @@ export async function procesarGastosPendientes() {
         for (const row of pendientes) {
             try {
                 const payload = JSON.parse(row.payload);
-                const { error } = await supabase.from('gastos').insert([payload]);
+                // Quitar campos que solo existen en SQLite local, no en Supabase
+                const { metodo_pago, dias_aplicados, fecha_ingreso, sincronizado, ...supabaseData } = payload;
+                const { error } = await supabase.from('gastos').insert([supabaseData]);
                 
                 if (!error) {
                     await db.execute("DELETE FROM gastos_pendientes WHERE id = ?", [row.id]);
@@ -1985,6 +2001,13 @@ await db.execute(`
             // ya existe, ignorar
         }
 
+        // --- MIGRACIÓN: agregar columna fecha_ingreso a gastos ---
+        try {
+            await db.execute("ALTER TABLE gastos ADD COLUMN fecha_ingreso TEXT");
+        } catch (e) {
+            // ya existe, ignorar
+        }
+
         // --- TABLA NOTAS ---
         await db.execute(`
             CREATE TABLE IF NOT EXISTS notas (
@@ -2310,19 +2333,43 @@ export async function getTecnicos() {
 
 export async function guardarTecnico(data) {
   const db = await Database.load("sqlite:cd_electronica.db");
+
   if (data.id) {
+    // Actualizar existente: local + Supabase
     await db.execute("UPDATE tecnicos SET nombre = ?, telefono = ?, especialidad = ? WHERE id = ?",
       [data.nombre.trim(), data.telefono || null, data.especialidad || null, data.id]);
-  } else {
-    const r = await db.execute("INSERT INTO tecnicos (nombre, telefono, especialidad) VALUES (?, ?, ?)",
-      [data.nombre.trim(), data.telefono || null, data.especialidad || null]);
-    data.id = r.lastInsertId;
+    try {
+      await supabase.from('tecnicos').update({
+        nombre: data.nombre.trim(), telefono: data.telefono || null, especialidad: data.especialidad || null
+      }).eq('id', data.id);
+    } catch (e) {
+      console.warn("Supabase no disponible al actualizar técnico:", e.message);
+    }
+    return data;
   }
-  try {
-    await supabase.from('tecnicos').upsert({ id: data.id, nombre: data.nombre.trim(), telefono: data.telefono || null, especialidad: data.especialidad || null });
-  } catch (e) {
-    console.warn("Supabase no disponible al guardar técnico:", e.message);
+
+  // Nuevo: primero intentar en Supabase para obtener el ID real
+  if (window.navigator.onLine) {
+    try {
+      const { data: supData, error } = await supabase.from('tecnicos').insert({
+        nombre: data.nombre.trim(), telefono: data.telefono || null, especialidad: data.especialidad || null
+      }).select().single();
+      if (!error && supData) {
+        await db.execute(
+          "INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)",
+          [supData.id, supData.nombre, supData.telefono || null, supData.especialidad || null]
+        );
+        return supData;
+      }
+    } catch (e) {
+      console.warn("Supabase no disponible al crear técnico:", e.message);
+    }
   }
+
+  // Offline fallback: guardar solo local
+  const r = await db.execute("INSERT INTO tecnicos (nombre, telefono, especialidad) VALUES (?, ?, ?)",
+    [data.nombre.trim(), data.telefono || null, data.especialidad || null]);
+  data.id = r.lastInsertId;
   return data;
 }
 

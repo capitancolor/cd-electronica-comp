@@ -532,7 +532,7 @@ export default function Reparaciones({ usuario, config }) {
       {showTecnicos && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
           <div style={{ background: '#f3f4f6', borderRadius: 12, width: '90%', height: '90%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <Tecnicos onClose={() => setShowTecnicos(false)} />
+            <Tecnicos onClose={() => { setShowTecnicos(false); getTecnicos().then(setTecnicosList).catch(() => {}); }} />
           </div>
         </div>
       )}

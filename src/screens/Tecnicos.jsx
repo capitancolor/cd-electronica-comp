@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Icon, toast } from '../components/UI'
+import { Icon, toast, ConfirmDialog } from '../components/UI'
 import { getTecnicos, guardarTecnico, eliminarTecnico, getReparacionesPorTecnico } from '../services/negocio'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR')
@@ -30,12 +30,14 @@ export default function Tecnicos({ onClose }) {
     finally { setLoading(false) }
   }
 
-  const handleEliminar = async (t) => {
-    alert(`ATENCIÓN: Vas a eliminar a "${t.nombre}". Esta acción no se puede deshacer.`)
-    if (!window.confirm(`¿Confirmas eliminar a "${t.nombre}"?`)) return
+  const [confirmDelete, setConfirmDelete] = useState(null)
+
+  const handleEliminar = async () => {
+    if (!confirmDelete) return
     try {
-      await eliminarTecnico(t.id)
+      await eliminarTecnico(confirmDelete.id)
       toast("Eliminado")
+      setConfirmDelete(null)
       await cargar()
     } catch (err) { toast("Error", "error") }
   }
@@ -83,7 +85,7 @@ export default function Tecnicos({ onClose }) {
                 <td style={{ padding: '12px 20px', textAlign: 'center' }}>
                   <button onClick={() => verTrabajos(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 5, color: '#2563eb' }} title="Ver trabajos"><Icon name="reports" size={18} /></button>
                   <button onClick={() => setModal({ id: t.id, nombre: t.nombre, telefono: t.telefono || '', especialidad: t.especialidad || '' })} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 5, color: '#2563eb' }}><Icon name="tune" size={18} /></button>
-                  <button onClick={() => handleEliminar(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 5, color: '#ef4444' }}><Icon name="trash" size={18} /></button>
+                  <button onClick={() => setConfirmDelete(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 5, color: '#ef4444' }}><Icon name="trash" size={18} /></button>
                 </td>
               </tr>
             ))}
@@ -124,6 +126,17 @@ export default function Tecnicos({ onClose }) {
       )}
 
       {/* MODAL TRABAJOS ASIGNADOS */}
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Eliminar Técnico"
+          message={`¿Estás seguro de eliminar a "${confirmDelete.nombre}"? Esta acción no se puede deshacer.`}
+          confirmLabel="Eliminar"
+          danger
+          onConfirm={handleEliminar}
+          onClose={() => setConfirmDelete(null)}
+        />
+      )}
+
       {trabajos && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
           <div style={{ background: '#fff', borderRadius: 12, padding: 25, width: 650, maxHeight: '80vh', overflowY: 'auto' }}>

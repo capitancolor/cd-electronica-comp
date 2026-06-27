@@ -5,6 +5,12 @@ import { exportarGastosExcel } from '../services/exportExcel'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
+const formatearFecha = (iso) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
 const formatearMonto = (raw) => {
   if (!raw) return ''
   const parts = raw.split(',')
@@ -55,6 +61,8 @@ function StatCard({ label, value, icon, color }) {
   )
 }
 
+const POR_PAGINA = 20
+
 export default function Gastos({ usuario, config }) {
   const [gastos, setGastos] = useState([])
   const [ventas, setVentas] = useState([])
@@ -68,6 +76,7 @@ export default function Gastos({ usuario, config }) {
   const [detalleVentasDia, setDetalleVentasDia] = useState(null)
   const [locales, setLocales] = useState([])
   const [filtroLocal, setFiltroLocal] = useState(usuario.rol !== 'admin' && config?.local_id ? String(config.local_id) : '')
+  const [paginaGastos, setPaginaGastos] = useState(1)
 
   const [sortGastos, setSortGastos] = useState({ key: 'descripcion', direction: 'asc' })
   const [sortRendimiento, setSortRendimiento] = useState({ key: 'dia', direction: 'asc' })
@@ -84,6 +93,7 @@ export default function Gastos({ usuario, config }) {
     let direction = 'asc';
     if (sortGastos.key === key && sortGastos.direction === 'asc') direction = 'desc';
     setSortGastos({ key, direction });
+    setPaginaGastos(1);
   }
 
   const handleSortRendimiento = (key) => {
@@ -160,6 +170,7 @@ async function cargarDatos() {
         metodo_pago: data.metodo_pago || 'efectivo',
         usuario_id: usuario.id,
         fecha: new Date(anioActual, mesActual, 1).toISOString(),
+        fecha_ingreso: data.fecha_ingreso || new Date().toISOString(),
         dias_aplicados: data.dias_aplicados?.length > 0 ? data.dias_aplicados : null
       }
       if (data.id) await actualizarGasto(data.id, payload)
@@ -230,6 +241,12 @@ async function cargarDatos() {
       return 0;
     });
   }, [gastos, sortGastos])
+
+  const totalPaginas = Math.max(1, Math.ceil(gastosOrdenados.length / POR_PAGINA))
+  const gastosPaginados = gastosOrdenados.slice((paginaGastos - 1) * POR_PAGINA, paginaGastos * POR_PAGINA)
+
+  // Resetear página cuando cambian los datos
+  useEffect(() => { setPaginaGastos(1) }, [gastos])
 
   const rendimientoData = useMemo(() => {
     const rows = Array.from({ length: diasEnMes }, (_, i) => {
@@ -320,6 +337,7 @@ async function cargarDatos() {
               <thead style={styles.thead}>
                 <tr>
                   <SortableTh label="DESCRIPCIÓN" field="descripcion" sortConfig={sortGastos} onSort={handleSortGastos} />
+                  <SortableTh label="F. INGRESO" field="fecha_ingreso" sortConfig={sortGastos} onSort={handleSortGastos} />
                   <SortableTh label="APLICACIÓN" field="aplicacion" sortConfig={sortGastos} onSort={handleSortGastos} />
                   <SortableTh label="PAGO" field="metodo_pago" sortConfig={sortGastos} onSort={handleSortGastos} />
                   <SortableTh label="MONTO" field="monto" sortConfig={sortGastos} onSort={handleSortGastos} align="right" />
@@ -327,9 +345,10 @@ async function cargarDatos() {
                 </tr>
               </thead>
               <tbody>
-                {gastosOrdenados.map(g => (
+                {gastosPaginados.map(g => (
                   <tr key={g.id} style={styles.tr}>
                     <td style={{ ...styles.td, fontWeight: 700 }}>{g.descripcion}</td>
+                    <td style={{ ...styles.td, fontSize: 11, color: '#6b7280', whiteSpace: 'nowrap' }}>{formatearFecha(g.fecha_ingreso)}</td>
                     <td style={styles.td}>
                       <Badge color="#6b7280">{g.dias_aplicados ? `${g.dias_aplicados.length} días` : 'Mes Completo'}</Badge>
                     </td>
@@ -346,6 +365,25 @@ async function cargarDatos() {
               </tbody>
             </table>
           </div>
+          {/* PAGINACIÓN */}
+          {totalPaginas > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6, padding: '10px 0', borderTop: `1px solid ${UI.border}` }}>
+              <button disabled={paginaGastos <= 1} onClick={() => setPaginaGastos(p => Math.max(1, p - 1))} style={{ ...styles.btnPagina, opacity: paginaGastos <= 1 ? 0.4 : 1 }}>‹</button>
+              {Array.from({ length: Math.min(totalPaginas, 10) }, (_, i) => {
+                const inicio = Math.max(1, Math.min(paginaGastos - 5, totalPaginas - 9))
+                const num = inicio + i
+                if (num > totalPaginas) return null
+                return (
+                  <button key={num} onClick={() => setPaginaGastos(num)}
+                    style={{ ...styles.btnPagina, fontWeight: paginaGastos === num ? 900 : 600, background: paginaGastos === num ? UI.accent : 'transparent', color: paginaGastos === num ? '#fff' : '#374151' }}>
+                    {num}
+                  </button>
+                )
+              })}
+              <button disabled={paginaGastos >= totalPaginas} onClick={() => setPaginaGastos(p => Math.min(totalPaginas, p + 1))} style={{ ...styles.btnPagina, opacity: paginaGastos >= totalPaginas ? 0.4 : 1 }}>›</button>
+              <span style={{ fontSize: 11, color: '#9ca3af', marginLeft: 8 }}>{gastosOrdenados.length} gastos</span>
+            </div>
+          )}
         </div>
 
         {/* RENDIMIENTO DIARIO */}
@@ -579,5 +617,6 @@ const styles = {
   gridDias: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 },
   dia: { aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 5, fontSize: 10, cursor: 'pointer', fontWeight: 700 },
   btnQuick: { flex: 1, padding: '5px', fontSize: 9, borderRadius: 4, border: '1px solid #ddd', cursor: 'pointer', background: '#fff', fontWeight: 700 },
-  btnGuardar: { background: UI.accent, color: '#fff', border: 'none', borderRadius: 8, padding: 15, fontWeight: 800, cursor: 'pointer', marginTop: 10 }
+  btnGuardar: { background: UI.accent, color: '#fff', border: 'none', borderRadius: 8, padding: 15, fontWeight: 800, cursor: 'pointer', marginTop: 10 },
+  btnPagina: { minWidth: 32, height: 32, borderRadius: 6, border: '1px solid #e5e7eb', cursor: 'pointer', fontSize: 13, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }
 }
