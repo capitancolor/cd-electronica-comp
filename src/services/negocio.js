@@ -920,14 +920,17 @@ export async function getVentasResumen({ localId = null, fechaDesde = null, fech
     const db = await Database.load("sqlite:cd_electronica.db");
     try {
         let query = supabase.from('ventas')
-            .select('id, fecha, total, local_id, metodo_pago')
+            .select('id, fecha, total, local_id, metodo_pago, detalle_mixto, venta_items(producto_id, cantidad, precio_unitario, descripcion, productos(precio_costo))')
             .order('fecha', { ascending: false }).limit(limit);
         if (localId) query = query.eq('local_id', localId);
         if (fechaDesde) query = query.gte('fecha', new Date(`${fechaDesde}T00:00:00`).toISOString());
         if (fechaHasta) query = query.lte('fecha', new Date(`${fechaHasta}T23:59:59`).toISOString());
         const { data, error } = await query;
         if (error) throw error;
-        return data || [];
+        return (data || []).map(v => ({
+            ...v,
+            costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || item.precio_costo || 0)), 0) || 0,
+        }));
     } catch (error) {
         if (checkOfflineError(error)) {
             let sql = "SELECT id, fecha, total, local_id, metodo_pago, productos_nombres, costo_total FROM ventas WHERE 1=1";
@@ -937,7 +940,7 @@ export async function getVentasResumen({ localId = null, fechaDesde = null, fech
             if (fechaHasta) { sql += " AND fecha <= ?"; params.push(new Date(`${fechaHasta}T23:59:59`).toISOString()); }
             const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
             for (const v of historial) {
-                v.venta_items = await db.select("SELECT producto_id, descripcion, cantidad, precio_unitario FROM venta_items_local WHERE venta_id = ?", [v.id]);
+                v.venta_items = await db.select("SELECT producto_id, descripcion, cantidad, precio_unitario, precio_costo FROM venta_items_local WHERE venta_id = ?", [v.id]);
             }
             return historial;
         }
