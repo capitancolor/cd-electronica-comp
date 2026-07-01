@@ -12,7 +12,7 @@ import Notas from './screens/Notas'
 import Clientes from './screens/Clientes' 
 import Reparaciones from './screens/Reparaciones'
 // MonitorPrecios removed
-import { inicializarBaseLocal, sincronizarTablasMaestras, sincronizarClientes, sincronizarReparacionesMaestras, procesarVentasPendientes, procesarProductosPendientes, procesarClientesPendientes } from './services/negocio';
+import { inicializarBaseLocal, sincronizarTablasMaestras, sincronizarClientes, sincronizarReparacionesMaestras, procesarVentasPendientes, procesarProductosPendientes, procesarClientesPendientes, congelarVentasAnteriores } from './services/negocio';
 
 const NAV = [
   { id: 'ventas',       label: 'Nueva Venta',  icon: 'computer', roles: ['admin', 'vendedor'] },
@@ -66,6 +66,9 @@ const ejecutarSincroCompleta = async () => {
 
       await sincronizarTablasMaestras();
       console.log("⬇️ Stock actualizado desde la nube.");
+
+      await congelarVentasAnteriores();
+      console.log("📸 Ventas anteriores congeladas.");
 
       await sincronizarReparacionesMaestras();
       console.log("⬇️ Reparaciones sincronizadas desde la nube.");
@@ -123,10 +126,17 @@ const ejecutarSincroCompleta = async () => {
     );
   }
 
+  const handleConfigured = async (nuevaConfig) => {
+    setConfig(nuevaConfig);
+    if (navigator.onLine) {
+      await ejecutarSincroCompleta();
+    }
+  };
+
   // 2. Si no hay configuración de local (Primera vez)
   if (!config) return (
     <>
-      <SetupLocal onConfigured={setConfig} />
+      <SetupLocal onConfigured={handleConfigured} />
       <ToastContainer toasts={toasts} />
     </>
   )

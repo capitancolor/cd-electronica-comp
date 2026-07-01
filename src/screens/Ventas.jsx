@@ -467,8 +467,10 @@ async function confirmarVentaFinal() {
         usuarioId: usuario.id, 
         items: carrito.map(item => ({
           producto_id: item.esManual ? null : item.producto_id,
-          nombre: item.nombre, 
-          precio_unitario: item.precio_unitario, 
+          nombre: item.nombre,
+          marca: item.marca || '',
+          modelo: item.modelo || '',
+          precio_unitario: item.precio_unitario,
           cantidad: item.cantidad,
           es_manual: item.esManual || false,
           es_recarga: item.esRecarga || false,

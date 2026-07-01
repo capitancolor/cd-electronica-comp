@@ -267,20 +267,18 @@ export async function crearProducto(data) {
 }
 
 export async function eliminarProducto(id) {
-  // 1. Borrar de Supabase
+  // 1. Borrar dependencias en Supabase
   await supabase.from('stock').delete().eq('producto_id', id);
   await supabase.from('movimientos_stock').delete().eq('producto_id', id);
-  await supabase.from('venta_items').delete().eq('producto_id', id);
-  const { error } = await supabase.from('productos').delete().eq('id', id);
-  
+
+  // 2. En Supabase: soft-delete (activo=false) para mantener FK de venta_items intacta.
+  //    Las snapshots en detalle_mixto.items_snapshot ya preservan nombres/precios históricos.
+  const { error } = await supabase.from('productos').update({ activo: false }).eq('id', id);
   if (error) throw error;
 
-  // --- NUEVO: BORRAR DE SQLITE LOCAL ---
+  // 3. En SQLite local: hard-delete para que desaparezca del stock
   const db = await Database.load("sqlite:cd_electronica.db");
-  // Opción A: Borrado físico
   await db.execute("DELETE FROM productos WHERE id = ?", [id]);
-  // Opción B: Si usás borrado lógico
-  // await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [id]);
 
   return { ok: true };
 }
@@ -540,7 +538,16 @@ export async function getStockCantidad(productoId, localId) {
 export async function registrarVenta({ localId, usuarioId, items, metodoPago, totalFinal, detalleMixto, reparacion_id }) {
   const db = await Database.load("sqlite:cd_electronica.db");
   const costoTotalItems = items.reduce((sum, it) => sum + (it.cantidad || 0) * (it.precio_costo || 0), 0);
-  const detalleConOrigen = (metodoPago === 'mixto' || detalleMixto?.es_reparacion) ? { ...(detalleMixto || {}), local_original: localId, costo_total: costoTotalItems } : null;
+  const itemsSnapshot = items.map(item => ({
+    producto_id: item.producto_id,
+    nombre: item.nombre || item.descripcion || 'Producto',
+    marca: item.marca || '',
+    modelo: item.modelo || '',
+    precio_costo: item.precio_costo || 0,
+    precio_unitario: item.precio_unitario,
+    cantidad: item.cantidad
+  }));
+  const detalleConOrigen = { ...(detalleMixto || {}), local_original: localId, costo_total: costoTotalItems, items_snapshot: itemsSnapshot };
 
   const descontarStockLocal = async () => {
     for (const item of items) {
@@ -690,7 +697,19 @@ export async function registrarNotaCredito({ localId, usuarioId, items, motivo }
       usuario_id: usuarioId,
       total: -total,
       metodo_pago: 'nota_credito',
-      detalle_mixto: { motivo, es_nota_credito: true, costo_proporcional: -costoTotal, ...(Object.keys(fechasCompra).length && { fechas_compra: fechasCompra }) },
+      detalle_mixto: {
+        motivo, es_nota_credito: true, costo_proporcional: -costoTotal,
+        items_snapshot: items.map(item => ({
+          producto_id: item.producto_id,
+          nombre: item.nombre || 'Producto',
+          marca: item.marca || '',
+          modelo: item.modelo || '',
+          precio_costo: item.precio_costo || 0,
+          precio_unitario: item.precio_unitario,
+          cantidad: item.cantidad
+        })),
+        ...(Object.keys(fechasCompra).length && { fechas_compra: fechasCompra })
+      },
       fecha: new Date().toISOString()
     }]).select().single();
 
@@ -757,38 +776,62 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
         const { data, error } = await query;
         if (error) throw error;
 
-        const formattedData = data?.map(v => ({
-            ...v,
-            local_nombre: v.locales?.nombre || 'S/D',
-            vendedor: v.usuarios?.nombre || 'Sistema',
-            productos_nombres: v.venta_items?.map(i => i.productos?.nombre || i.descripcion).join(', '),
-            productos_marcas: [...new Set(v.venta_items?.map(i => i.productos?.marca).filter(Boolean))].join(', '),
-            productos_modelos: [...new Set(v.venta_items?.map(i => i.productos?.modelo).filter(Boolean))].join(', '),
-            categorias_nombres: [...new Set(v.venta_items?.map(i => i.productos?.categorias?.nombre).filter(Boolean))].join(', ') || 'Sin categoría',
-            costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
-            venta_items: v.venta_items?.map(item => ({
-                ...item,
-                categoria_nombre: item.productos?.categorias?.nombre || 'Sin categoría'
-            })) // Crucial para los contadores de la UI
-        })) || [];
+        const formattedData = data?.map(v => {
+            // Inyectar snapshot histórico como si fuera productos (para compatibilidad total)
+            if (v.detalle_mixto?.items_snapshot?.length > 0) {
+                const snapMap = {};
+                v.detalle_mixto.items_snapshot.forEach(s => { snapMap[s.producto_id || 'null'] = s; });
+                v.venta_items = v.venta_items?.map(item => ({
+                    ...item,
+                    productos: snapMap[item.producto_id || 'null'] ? {
+                        nombre: snapMap[item.producto_id || 'null'].nombre,
+                        marca: snapMap[item.producto_id || 'null'].marca,
+                        modelo: snapMap[item.producto_id || 'null'].modelo,
+                        precio_costo: snapMap[item.producto_id || 'null'].precio_costo,
+                        categorias: { nombre: '' }
+                    } : item.productos || { nombre: item.descripcion || 'Producto', marca: '', modelo: '', precio_costo: 0, categorias: { nombre: '' } }
+                }));
+            }
+            return {
+                ...v,
+                local_nombre: v.locales?.nombre || 'S/D',
+                vendedor: v.usuarios?.nombre || 'Sistema',
+                productos_nombres: v.venta_items?.map(i => i.productos?.nombre || i.descripcion).join(', '),
+                productos_marcas: [...new Set(v.venta_items?.map(i => i.productos?.marca).filter(Boolean))].join(', '),
+                productos_modelos: [...new Set(v.venta_items?.map(i => i.productos?.modelo).filter(Boolean))].join(', '),
+                categorias_nombres: [...new Set(v.venta_items?.map(i => i.productos?.categorias?.nombre).filter(Boolean))].join(', ') || 'Sin categoría',
+                costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
+                venta_items: v.venta_items?.map(item => ({
+                    ...item,
+                    categoria_nombre: item.productos?.categorias?.nombre || 'Sin categoría'
+                }))
+            };
+        }) || [];
 
-        // --- 2. SINCRONIZACIÓN AL ESPEJO LOCAL ---
-        for (const v of formattedData) {
-            await db.execute(
-                `INSERT OR REPLACE INTO ventas (id, fecha, total, metodo_pago, local_id, local_nombre, vendedor, productos_nombres, productos_marcas, productos_modelos, costo_total, detalle_mixto) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [v.id, v.fecha, v.total, v.metodo_pago, v.local_id, v.local_nombre, v.vendedor, v.productos_nombres, v.productos_marcas, v.productos_modelos, v.costo_total, v.detalle_mixto ? JSON.stringify(v.detalle_mixto) : null]
-            );
-            
-            if (v.venta_items) {
-                await db.execute("DELETE FROM venta_items_local WHERE venta_id = ?", [v.id]);
-                for (const it of v.venta_items) {
-                    await db.execute(
-                        "INSERT INTO venta_items_local (venta_id, producto_id, nombre, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)",
-                        [v.id, it.producto_id, it.productos?.nombre || it.descripcion, it.cantidad, it.precio_unitario]
-                    );
+        // --- 2. SINCRONIZACIÓN AL ESPEJO LOCAL (todo en una transacción) ---
+        await db.execute("BEGIN TRANSACTION");
+        try {
+            for (const v of formattedData) {
+                await db.execute(
+                    `INSERT OR REPLACE INTO ventas (id, fecha, total, metodo_pago, local_id, local_nombre, vendedor, productos_nombres, productos_marcas, productos_modelos, costo_total, detalle_mixto) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [v.id, v.fecha, v.total, v.metodo_pago, v.local_id, v.local_nombre, v.vendedor, v.productos_nombres, v.productos_marcas, v.productos_modelos, v.costo_total, v.detalle_mixto ? JSON.stringify(v.detalle_mixto) : null]
+                );
+                
+                if (v.venta_items) {
+                    await db.execute("DELETE FROM venta_items_local WHERE venta_id = ?", [v.id]);
+                    for (const it of v.venta_items) {
+                        await db.execute(
+                            "INSERT INTO venta_items_local (venta_id, producto_id, nombre, marca, modelo, cantidad, precio_unitario, precio_costo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            [v.id, it.producto_id, it.productos?.nombre || it.descripcion, it.productos?.marca || '', it.productos?.modelo || '', it.cantidad, it.precio_unitario, it.productos?.precio_costo || 0]
+                        );
+                    }
                 }
             }
+            await db.execute("COMMIT");
+        } catch (e) {
+            await db.execute("ROLLBACK");
+            throw e;
         }
         return formattedData;
 
@@ -806,12 +849,33 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             
             const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
 
-            // B. Rehidratar los items y detalle_mixto de cada venta
+            // B. Rehidratar los items, detalle_mixto y snapshot de cada venta
             for (let v of historial) {
                 const items = await db.select("SELECT * FROM venta_items_local WHERE venta_id = ?", [v.id]);
                 v.venta_items = items;
                 if (v.detalle_mixto && typeof v.detalle_mixto === 'string') {
                     v.detalle_mixto = JSON.parse(v.detalle_mixto);
+                }
+                // Inyectar snapshot histórico en items offline
+                if (v.detalle_mixto?.items_snapshot?.length > 0) {
+                    const snapMap = {};
+                    v.detalle_mixto.items_snapshot.forEach(s => { snapMap[s.producto_id || 'null'] = s; });
+                    v.venta_items = v.venta_items?.map(item => ({
+                        ...item,
+                        productos: snapMap[item.producto_id || 'null'] ? {
+                            nombre: snapMap[item.producto_id || 'null'].nombre,
+                            marca: snapMap[item.producto_id || 'null'].marca,
+                            modelo: snapMap[item.producto_id || 'null'].modelo,
+                            precio_costo: snapMap[item.producto_id || 'null'].precio_costo,
+                            categorias: { nombre: '' }
+                        } : { nombre: item.nombre || 'Producto', marca: item.marca || '', modelo: item.modelo || '', precio_costo: item.precio_costo || 0, categorias: { nombre: '' } }
+                    }));
+                } else {
+                    // Fallback: usar datos de venta_items_local si no hay snapshot
+                    v.venta_items = v.venta_items?.map(item => ({
+                        ...item,
+                        productos: { nombre: item.nombre || 'Producto', marca: item.marca || '', modelo: item.modelo || '', precio_costo: item.precio_costo || 0, categorias: { nombre: '' } }
+                    }));
                 }
             }
 
@@ -819,6 +883,7 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             const pendientesRaw = await db.select("SELECT * FROM ventas_pendientes");
             const pendientes = pendientesRaw.map(r => {
                 const p = JSON.parse(r.payload);
+                const items = p.items || [];
                 return {
                     id: `PEND-${r.id}`,
                     fecha: p.fecha,
@@ -827,9 +892,12 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
                     local_id: p.localId,
                     local_nombre: p.localId === 1 ? 'LOCAL 1' : 'LOCAL 2',
                     vendedor: 'Vendedor Offline',
-                    productos_nombres: p.items?.map(i => i.nombre || i.descripcion).join(', '),
-                    costo_total: p.detalleMixto?.costo_reparacion || 0,
-                    venta_items: p.items, // Importante para la UI
+                    productos_nombres: items.map(i => i.nombre || i.descripcion).join(', '),
+                    costo_total: items.reduce((sum, i) => sum + (i.cantidad || 0) * (i.precio_costo || 0), 0),
+                    venta_items: items.map(i => ({
+                        ...i,
+                        productos: { nombre: i.nombre || i.descripcion || 'Producto', marca: i.marca || '', modelo: i.modelo || '', precio_costo: i.precio_costo || 0, categorias: { nombre: '' } }
+                    })),
                     offline: true
                 };
             });
@@ -843,6 +911,35 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
             });
 
             return [...pendientesFiltrados, ...historial];
+        }
+        throw error;
+    }
+}
+
+export async function getVentasResumen({ localId = null, fechaDesde = null, fechaHasta = null, limit = 200 } = {}) {
+    const db = await Database.load("sqlite:cd_electronica.db");
+    try {
+        let query = supabase.from('ventas')
+            .select('id, fecha, total, local_id, metodo_pago, productos_nombres, costo_total, venta_items(producto_id, descripcion, cantidad, precio_unitario)')
+            .order('fecha', { ascending: false }).limit(limit);
+        if (localId) query = query.eq('local_id', localId);
+        if (fechaDesde) query = query.gte('fecha', new Date(`${fechaDesde}T00:00:00`).toISOString());
+        if (fechaHasta) query = query.lte('fecha', new Date(`${fechaHasta}T23:59:59`).toISOString());
+        const { data, error } = await query;
+        if (error) throw error;
+        return data || [];
+    } catch (error) {
+        if (checkOfflineError(error)) {
+            let sql = "SELECT id, fecha, total, local_id, metodo_pago, productos_nombres, costo_total FROM ventas WHERE 1=1";
+            let params = [];
+            if (localId) { sql += " AND local_id = ?"; params.push(localId); }
+            if (fechaDesde) { sql += " AND fecha >= ?"; params.push(new Date(`${fechaDesde}T00:00:00`).toISOString()); }
+            if (fechaHasta) { sql += " AND fecha <= ?"; params.push(new Date(`${fechaHasta}T23:59:59`).toISOString()); }
+            const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
+            for (const v of historial) {
+                v.venta_items = await db.select("SELECT producto_id, descripcion, cantidad, precio_unitario FROM venta_items_local WHERE venta_id = ?", [v.id]);
+            }
+            return historial;
         }
         throw error;
     }
@@ -1026,9 +1123,24 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
     const { error: errInsert } = await supabase.from('venta_items').insert(detalleInsert);
     if (errInsert) throw errInsert;
 
-    // 4. Actualizar total de la venta
+    // 4. Actualizar total y snapshot de la venta
+    const itemsSnapshot = items.map(item => ({
+      producto_id: item.producto_id,
+      nombre: item.nombre || item.descripcion || 'Producto',
+      marca: item.marca || '',
+      modelo: item.modelo || '',
+      precio_costo: item.precio_costo || 0,
+      precio_unitario: item.precio_unitario,
+      cantidad: item.cantidad
+    }));
+    const detalleActual = (typeof venta.detalle_mixto === 'object' && venta.detalle_mixto) ? venta.detalle_mixto : {};
     const { error: errUpdate } = await supabase.from('ventas')
-      .update({ total: newTotal, metodo_pago: metodoPago || venta.metodo_pago, ...(fecha ? { fecha } : {}) })
+      .update({
+        total: newTotal,
+        metodo_pago: metodoPago || venta.metodo_pago,
+        detalle_mixto: { ...detalleActual, items_snapshot: itemsSnapshot },
+        ...(fecha ? { fecha } : {})
+      })
       .eq('id', ventaId);
     if (errUpdate) throw errUpdate;
 
@@ -1036,8 +1148,8 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
     await db.execute("DELETE FROM venta_items_local WHERE venta_id = ?", [ventaId]);
     for (const it of items) {
       await db.execute(
-        "INSERT INTO venta_items_local (venta_id, producto_id, nombre, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)",
-        [ventaId, it.producto_id, it.nombre || it.descripcion || "Producto", it.cantidad, it.precio_unitario]
+        "INSERT INTO venta_items_local (venta_id, producto_id, nombre, cantidad, precio_unitario, precio_costo) VALUES (?, ?, ?, ?, ?, ?)",
+        [ventaId, it.producto_id, it.nombre || it.descripcion || "Producto", it.cantidad, it.precio_unitario, it.precio_costo || 0]
       );
     }
     const updateParts = ['total = ?', 'productos_nombres = ?'];
@@ -1066,35 +1178,42 @@ export async function getGastos(desde, hasta) {
   try {
     const { data, error } = await supabase.from('gastos').select('*').gte('fecha', desde).lte('fecha', hasta).order('fecha', { ascending: false });
     if (error) throw error;
-    if (data) {
+    if (data && data.length > 0) {
       const db = await Database.load("sqlite:cd_electronica.db");
-      // Respaldar datos locales antes de que el sync los pise
-      const locales = await db.select("SELECT id, dias_aplicados, metodo_pago, fecha_ingreso FROM gastos WHERE dias_aplicados IS NOT NULL OR metodo_pago IS NOT NULL OR fecha_ingreso IS NOT NULL");
+
+      // Backup campos locales antes del sync (solo el rango de fechas consultado)
+      const locales = await db.select(
+        "SELECT id, dias_aplicados, metodo_pago, fecha_ingreso FROM gastos WHERE (dias_aplicados IS NOT NULL OR metodo_pago IS NOT NULL OR fecha_ingreso IS NOT NULL) AND fecha >= ? AND fecha <= ?",
+        [desde, hasta]
+      );
       const mapaDias = {}, mapaPago = {}, mapaIngreso = {};
       for (const l of locales) {
         if (l.dias_aplicados) mapaDias[l.id] = l.dias_aplicados;
         if (l.metodo_pago) mapaPago[l.id] = l.metodo_pago;
         if (l.fecha_ingreso) mapaIngreso[l.id] = l.fecha_ingreso;
       }
-      // Sync desde Supabase
-      for (const g of data) {
-        await db.execute(
-          "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, metodo_pago, sincronizado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
-          [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, g.metodo_pago || 'efectivo', 1]
-        );
-        // Restaurar datos que solo existen localmente
-        if (mapaDias[g.id]) {
-          await db.execute("UPDATE gastos SET dias_aplicados = ? WHERE id = ?", [mapaDias[g.id], g.id]);
-          g.dias_aplicados = JSON.parse(mapaDias[g.id]);
+
+      // Todo en una sola transacción (mucho más rápido que INSERT OR REPLACE + UPDATE individual)
+      await db.execute("BEGIN TRANSACTION");
+      try {
+        await db.execute("DELETE FROM gastos WHERE fecha >= ? AND fecha <= ?", [desde, hasta]);
+        for (const g of data) {
+          const metodoPago = mapaPago[g.id] || g.metodo_pago || 'efectivo';
+          const fechaIngreso = mapaIngreso[g.id] || null;
+          const diasAplicados = mapaDias[g.id] || null;
+          await db.execute(
+            "INSERT INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, metodo_pago, sincronizado, dias_aplicados, fecha_ingreso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, metodoPago, diasAplicados, fechaIngreso]
+          );
+          // Fusionar datos locales en el objeto de retorno
+          if (mapaDias[g.id]) g.dias_aplicados = JSON.parse(mapaDias[g.id]);
+          if (mapaPago[g.id]) g.metodo_pago = mapaPago[g.id];
+          if (mapaIngreso[g.id]) g.fecha_ingreso = mapaIngreso[g.id];
         }
-        if (mapaPago[g.id]) {
-          await db.execute("UPDATE gastos SET metodo_pago = ? WHERE id = ?", [mapaPago[g.id], g.id]);
-          g.metodo_pago = mapaPago[g.id];
-        }
-        if (mapaIngreso[g.id]) {
-          await db.execute("UPDATE gastos SET fecha_ingreso = ? WHERE id = ?", [mapaIngreso[g.id], g.id]);
-          g.fecha_ingreso = mapaIngreso[g.id];
-        }
+        await db.execute("COMMIT");
+      } catch (e) {
+        await db.execute("ROLLBACK");
+        throw e;
       }
     }
     return data || [];
@@ -1501,24 +1620,42 @@ export const getStock = async ({ busqueda = '' } = {}) => {
       stock_l2: p.stock?.find(s => s.local_id === 2)?.cantidad || 0
     }));
 
-    // 2. Sincronización inteligente: Solo actualizo si no hay ventas pendientes de ese producto
-    for (const p of formattedData) {
-      // Verificamos si este producto está en alguna venta que aún no llegó a la nube
-      const pendientes = await db.select(
-        "SELECT id FROM ventas_pendientes WHERE payload LIKE ?",
-        [`%"producto_id":${p.id}%`]
-      );
+    // 2. Sincronización inteligente: Extraer IDs bloqueados por ventas pendientes (un solo query)
+    const pendientes = await db.select("SELECT payload FROM ventas_pendientes");
+    const pendingProductIds = new Set();
+    for (const row of pendientes) {
+      try {
+        const pl = JSON.parse(row.payload);
+        if (pl.producto_id) pendingProductIds.add(pl.producto_id);
+        if (pl.items) pl.items.forEach(i => pendingProductIds.add(i.producto_id));
+      } catch (_) {}
+    }
 
-      // Si hay pendientes, NO hacemos el REPLACE. Mantenemos el stock local restado.
-      if (pendientes.length === 0) {
+    await db.execute("BEGIN TRANSACTION");
+    try {
+      for (const p of formattedData) {
+        if (pendingProductIds.has(p.id)) {
+          console.log(`⏳ Protegiendo stock local de ${p.nombre} por venta pendiente en cola.`);
+          continue;
+        }
         await db.execute(
-          `INSERT OR REPLACE INTO productos (id, nombre, codigo, marca, modelo, precio_venta, precio_costo, stock_l1, stock_l2, activo) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-          [p.id, p.nombre, p.codigo, p.marca, p.modelo, p.precio_venta, p.precio_costo, p.stock_l1, p.stock_l2]
+          `INSERT OR REPLACE INTO productos (
+              id, codigo, nombre, precio_venta, precio_costo,
+              precio_costo_usd, precio_promo, en_promo,
+              categoria_id, marca, modelo, activo,
+              proveedor_id, stock_l1, stock_l2
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+              p.id, p.codigo, p.nombre, p.precio_venta || 0, p.precio_costo || 0,
+              p.precio_costo_usd || 0, p.precio_promo || 0, p.en_promo ? 1 : 0,
+              p.categoria_id, p.marca, p.modelo, 1, p.proveedor_id, p.stock_l1, p.stock_l2
+          ]
         );
-      } else {
-        console.log(`⏳ Protegiendo stock local de ${p.nombre} por venta pendiente en cola.`);
       }
+      await db.execute("COMMIT");
+    } catch (e) {
+      await db.execute("ROLLBACK");
+      throw e;
     }
 
     return formattedData;
@@ -1955,11 +2092,15 @@ await db.execute(`
         venta_id INTEGER,
         producto_id INTEGER,
         nombre TEXT,
+        marca TEXT DEFAULT '',
+        modelo TEXT DEFAULT '',
         cantidad REAL,
         precio_unitario REAL,
-        precio_costo REAL
+        precio_costo REAL DEFAULT 0
     );
 `);
+try { await db.execute("ALTER TABLE venta_items_local ADD COLUMN marca TEXT DEFAULT ''"); } catch (_) {}
+try { await db.execute("ALTER TABLE venta_items_local ADD COLUMN modelo TEXT DEFAULT ''"); } catch (_) {}
 
         // --- TABLA USUARIOS (Para login offline si fuera necesario) ---
         await db.execute(`
@@ -2092,44 +2233,15 @@ export async function sincronizarTablasMaestras() {
         
         const db = await Database.load("sqlite:cd_electronica.db");
 
-        // 2. Sincronizar Categorías
-        const { data: cats, error: errCats } = await supabase.from('categorias').select('*');
+        // ─── Primero obtener todos los datos de Supabase (network) ───
+        const [{ data: cats, error: errCats }, { data: provs, error: errProvs }, { data: tecs, error: errTecs }] = await Promise.all([
+            supabase.from('categorias').select('*'),
+            supabase.from('proveedores').select('*'),
+            supabase.from('tecnicos').select('*').order('nombre', { ascending: true })
+        ]);
         if (errCats) throw errCats;
-        if (cats) {
-            await db.execute("DELETE FROM categorias");
-            for (const c of cats) {
-                await db.execute(
-                    "INSERT OR REPLACE INTO categorias (id, nombre) VALUES (?, ?)", 
-                    [c.id, c.nombre]
-                );
-            }
-        }
-
-        // 2b. Sincronizar Proveedores
-        const { data: provs, error: errProvs } = await supabase.from('proveedores').select('*');
         if (errProvs) throw errProvs;
-        if (provs) {
-            await db.execute("DELETE FROM proveedores");
-            for (const p of provs) {
-                await db.execute(
-                    "INSERT OR REPLACE INTO proveedores (id, nombre, contacto, telefono, email, direccion, activo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [p.id, p.nombre, p.contacto, p.telefono, p.email, p.direccion, p.activo ? 1 : 0]
-                );
-            }
-        }
-
-        // 2c. Sincronizar Técnicos
-        const { data: tecs, error: errTecs } = await supabase.from('tecnicos').select('*').order('nombre', { ascending: true });
         if (errTecs) throw errTecs;
-        if (tecs) {
-            await db.execute("DELETE FROM tecnicos");
-            for (const t of tecs) {
-                await db.execute(
-                    "INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)",
-                    [t.id, t.nombre, t.telefono || null, t.especialidad || null]
-                );
-            }
-        }
 
         // 3. Sincronizar Productos (mapeando tipos de datos)
         const { data: prods, error: errProds } = await supabase.from('productos')
@@ -2137,6 +2249,38 @@ export async function sincronizarTablasMaestras() {
             .eq('activo', true);
             
         if (errProds) throw errProds;
+
+        // ─── Escribir todo a SQLite en una sola transacción ───
+        await db.execute("BEGIN TRANSACTION");
+        if (cats) {
+                await db.execute("DELETE FROM categorias");
+                for (const c of cats) {
+                    await db.execute(
+                        "INSERT OR REPLACE INTO categorias (id, nombre) VALUES (?, ?)", 
+                        [c.id, c.nombre]
+                    );
+                }
+            }
+
+            if (provs) {
+                await db.execute("DELETE FROM proveedores");
+                for (const p of provs) {
+                    await db.execute(
+                        "INSERT OR REPLACE INTO proveedores (id, nombre, contacto, telefono, email, direccion, activo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [p.id, p.nombre, p.contacto, p.telefono, p.email, p.direccion, p.activo ? 1 : 0]
+                    );
+                }
+            }
+
+            if (tecs) {
+                await db.execute("DELETE FROM tecnicos");
+                for (const t of tecs) {
+                    await db.execute(
+                        "INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)",
+                        [t.id, t.nombre, t.telefono || null, t.especialidad || null]
+                    );
+                }
+            }
 
         if (prods) {
             // ─── DEDUPLICAR: agrupar por codigo, fusionar stock, limpiar Supabase ───
@@ -2199,23 +2343,27 @@ export async function sincronizarTablasMaestras() {
                 }
             }
 
-            // ─── SINCRONIZAR A SQLITE ───
-            for (const p of prods) {
-                // BI-Logic: ¿Tengo este producto en la cola de salida (ventas pendientes)?
-                const enCola = await db.select(
-                    "SELECT id FROM ventas_pendientes WHERE payload LIKE ?",
-                    [`%"producto_id":${p.id}%`]
-                );
+            // ─── SINCRONIZAR A SQLITE (dentro de la misma transacción) ───
+            // Extraer IDs de productos en ventas pendientes (un solo query en vez de N)
+            const pendientes = await db.select("SELECT payload FROM ventas_pendientes");
+            const pendingProductIds = new Set();
+            for (const row of pendientes) {
+                try {
+                    const pl = JSON.parse(row.payload);
+                    if (pl.producto_id) pendingProductIds.add(pl.producto_id);
+                    if (pl.items) pl.items.forEach(i => pendingProductIds.add(i.producto_id));
+                } catch (_) {}
+            }
 
-                if (enCola.length > 0) {
-                  console.log(`⚠️ Producto ${p.nombre} omitido en sincro por transacción pendiente.`);
-                  continue;
+            for (const p of prods) {
+                if (pendingProductIds.has(p.id)) {
+                    console.log(`⚠️ Producto ${p.nombre} omitido en sincro por transacción pendiente.`);
+                    continue;
                 }
 
                 const s1 = p.stock?.find(s => s.local_id === 1)?.cantidad || 0;
                 const s2 = p.stock?.find(s => s.local_id === 2)?.cantidad || 0;
-                
-                // Eliminar duplicados locales con mismo codigo pero distinto id
+
                 await db.execute(
                     "DELETE FROM productos WHERE codigo = ? AND id != ?",
                     [p.codigo, p.id]
@@ -2235,22 +2383,32 @@ export async function sincronizarTablasMaestras() {
                     ]
                 );
             }
+            // ─── LIMPIEZA: productos locales que ya no existen en la nube ───
+            if (prods && prods.length > 0) {
+                const codigosNube = new Set(prods.map(p => p.codigo?.toString().trim()).filter(Boolean))
+                const localesActivos = await db.select(
+                    "SELECT id, codigo FROM productos WHERE activo = 1"
+                )
+                for (const loc of localesActivos) {
+                    const cod = loc.codigo?.toString().trim()
+                    if (cod && !codigosNube.has(cod)) {
+                        await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [loc.id])
+                        console.log(`🧹 Producto local ID ${loc.id} (cod:${cod}) marcado inactivo - no existe en nube`)
+                    }
+                }
+            }
         }
-
-        // ─── LIMPIEZA: productos locales que ya no existen en la nube ───
-        if (prods && prods.length > 0) {
-            const codigosNube = new Set(prods.map(p => p.codigo?.toString().trim()).filter(Boolean))
+        // productos sin datos de la nube: solo marcar inactivos si prods es null
+        if (!prods) {
             const localesActivos = await db.select(
                 "SELECT id, codigo FROM productos WHERE activo = 1"
             )
             for (const loc of localesActivos) {
-                const cod = loc.codigo?.toString().trim()
-                if (cod && !codigosNube.has(cod)) {
-                    await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [loc.id])
-                    console.log(`🧹 Producto local ID ${loc.id} (cod:${cod}) marcado inactivo - no existe en nube`)
-                }
+                await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [loc.id])
             }
         }
+
+        await db.execute("COMMIT");
 
         console.log("✅ Sincronización maestra finalizada protegiendo datos locales.");
     } catch (error) {
@@ -2471,4 +2629,55 @@ export async function registrarPagoReparacion({ reparacionId, localId, usuarioId
   }
 
   throw new Error("Error al registrar pago de reparación");
+}
+
+/**
+ * Congelar ventas anteriores: backfill de items_snapshot para todas las ventas
+ * que aún no tienen snapshot. Se ejecuta una sola vez por venta.
+ */
+export async function congelarVentasAnteriores() {
+  if (!window.navigator.onLine) return 0;
+  try {
+    const { data: ventas, error } = await supabase.from('ventas')
+      .select('id, detalle_mixto, venta_items(*, productos(nombre, marca, modelo, precio_costo))')
+      .order('fecha', { ascending: false })
+      .limit(500);
+
+    if (error) throw error;
+    if (!ventas || ventas.length === 0) return 0;
+
+    let actualizadas = 0;
+    for (const v of ventas) {
+      const dm = v.detalle_mixto;
+      if (dm && dm.items_snapshot) continue;
+
+      const snapshot = (v.venta_items || [])
+        .filter(i => i.producto_id)
+        .map(i => ({
+          producto_id: i.producto_id,
+          nombre: i.productos?.nombre || i.descripcion || 'Producto',
+          marca: i.productos?.marca || '',
+          modelo: i.productos?.modelo || '',
+          precio_costo: i.productos?.precio_costo || 0,
+          precio_unitario: i.precio_unitario,
+          cantidad: i.cantidad
+        }));
+
+      if (snapshot.length === 0) continue;
+
+      const { error: errUpd } = await supabase.from('ventas').update({
+        detalle_mixto: { ...(dm || {}), items_snapshot: snapshot }
+      }).eq('id', v.id);
+
+      if (!errUpd) actualizadas++;
+    }
+
+    if (actualizadas > 0) {
+      console.log(`📸 ${actualizadas} ventas congeladas con snapshot histórico.`);
+    }
+    return actualizadas;
+  } catch (error) {
+    console.warn("Error congelando ventas:", error.message);
+    return 0;
+  }
 }

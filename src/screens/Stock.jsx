@@ -117,6 +117,7 @@ const getDb = async () => {
   const cargarStock = useCallback(async () => {
     try {
       setLoading(true);
+
       const db = await getDb();
       const data = await db.select("SELECT * FROM productos WHERE activo = 1");
 
