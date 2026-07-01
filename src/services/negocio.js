@@ -920,7 +920,7 @@ export async function getVentasResumen({ localId = null, fechaDesde = null, fech
     const db = await Database.load("sqlite:cd_electronica.db");
     try {
         let query = supabase.from('ventas')
-            .select('id, fecha, total, local_id, metodo_pago, productos_nombres, costo_total, venta_items(producto_id, descripcion, cantidad, precio_unitario)')
+            .select('id, fecha, total, local_id, metodo_pago')
             .order('fecha', { ascending: false }).limit(limit);
         if (localId) query = query.eq('local_id', localId);
         if (fechaDesde) query = query.gte('fecha', new Date(`${fechaDesde}T00:00:00`).toISOString());
