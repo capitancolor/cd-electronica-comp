@@ -917,34 +917,53 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
 }
 
 export async function getVentasResumen({ localId = null, fechaDesde = null, fechaHasta = null, limit = 200 } = {}) {
-    const db = await Database.load("sqlite:cd_electronica.db");
     try {
         let query = supabase.from('ventas')
-            .select('id, fecha, total, local_id, metodo_pago, detalle_mixto, venta_items(producto_id, cantidad, precio_unitario, descripcion, productos(precio_costo))')
-            .order('fecha', { ascending: false }).limit(limit);
+            .select('id, fecha, total, local_id, metodo_pago, detalle_mixto, venta_items(producto_id, cantidad, precio_unitario, descripcion, productos(precio_costo)), locales(nombre)')
+            .order('fecha', { ascending: false });
+        if (fechaDesde || fechaHasta) {
+            query = query.range(0, 999);
+        } else {
+            query = query.limit(limit);
+        }
         if (localId) query = query.eq('local_id', localId);
         if (fechaDesde) query = query.gte('fecha', new Date(`${fechaDesde}T00:00:00`).toISOString());
         if (fechaHasta) query = query.lte('fecha', new Date(`${fechaHasta}T23:59:59`).toISOString());
         const { data, error } = await query;
         if (error) throw error;
+        console.log(`getVentasResumen: ${data?.length || 0} ventas`);
         return (data || []).map(v => ({
             ...v,
-            costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || item.precio_costo || 0)), 0) || 0,
+            costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((sum, i) => sum + (i.cantidad || 0) * (i.productos?.precio_costo || 0), 0) || 0,
+            local_nombre: v.locales?.nombre || 'S/D',
+            productos_nombres: v.venta_items?.map(i => i.descripcion).filter(Boolean).join(', ') || (v.detalle_mixto?.items_snapshot?.map(s => s.nombre).filter(Boolean).join(', ') || undefined),
+            venta_items: v.venta_items?.map(i => ({
+                producto_id: i.producto_id,
+                descripcion: i.descripcion,
+                cantidad: i.cantidad,
+                precio_unitario: i.precio_unitario,
+                productos: i.productos ? { precio_costo: i.productos.precio_costo } : undefined,
+            })) || [],
         }));
     } catch (error) {
         if (checkOfflineError(error)) {
-            let sql = "SELECT id, fecha, total, local_id, metodo_pago, productos_nombres, costo_total FROM ventas WHERE 1=1";
-            let params = [];
-            if (localId) { sql += " AND local_id = ?"; params.push(localId); }
-            if (fechaDesde) { sql += " AND fecha >= ?"; params.push(new Date(`${fechaDesde}T00:00:00`).toISOString()); }
-            if (fechaHasta) { sql += " AND fecha <= ?"; params.push(new Date(`${fechaHasta}T23:59:59`).toISOString()); }
-            const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
-            for (const v of historial) {
-                v.venta_items = await db.select("SELECT producto_id, descripcion, cantidad, precio_unitario, precio_costo FROM venta_items_local WHERE venta_id = ?", [v.id]);
-            }
-            return historial;
+            try {
+                const db = await Database.load("sqlite:cd_electronica.db");
+                let sql = "SELECT id, fecha, total, local_id, metodo_pago, productos_nombres, costo_total, local_nombre FROM ventas WHERE 1=1";
+                let params = [];
+                if (localId) { sql += " AND local_id = ?"; params.push(localId); }
+                if (fechaDesde) { sql += " AND fecha >= ?"; params.push(new Date(`${fechaDesde}T00:00:00`).toISOString()); }
+                if (fechaHasta) { sql += " AND fecha <= ?"; params.push(new Date(`${fechaHasta}T23:59:59`).toISOString()); }
+                const historial = await db.select(sql + " ORDER BY fecha DESC LIMIT ?", [...params, limit]);
+                for (const v of historial) {
+                    v.venta_items = (await db.select("SELECT * FROM venta_items_local WHERE venta_id = ?", [v.id])).map(i => ({ producto_id: i.producto_id, descripcion: i.nombre || '', cantidad: i.cantidad, precio_unitario: i.precio_unitario }));
+                    if (!v.local_nombre) v.local_nombre = 'S/D';
+                }
+                return historial;
+            } catch (e) { console.error("Error en offline path:", e); return []; }
         }
-        throw error;
+        console.error("Error en getVentasResumen:", error?.message || error);
+        return [];
     }
 }
 
@@ -1184,7 +1203,7 @@ export async function getGastos(desde, hasta) {
     if (data && data.length > 0) {
       const db = await Database.load("sqlite:cd_electronica.db");
 
-      // Backup campos locales antes del sync (solo el rango de fechas consultado)
+      // Backup campos locales antes del sync
       const locales = await db.select(
         "SELECT id, dias_aplicados, metodo_pago, fecha_ingreso FROM gastos WHERE (dias_aplicados IS NOT NULL OR metodo_pago IS NOT NULL OR fecha_ingreso IS NOT NULL) AND fecha >= ? AND fecha <= ?",
         [desde, hasta]
@@ -1196,20 +1215,23 @@ export async function getGastos(desde, hasta) {
         if (l.fecha_ingreso) mapaIngreso[l.id] = l.fecha_ingreso;
       }
 
-      // Todo en una sola transacción (mucho más rápido que INSERT OR REPLACE + UPDATE individual)
       await db.execute("BEGIN TRANSACTION");
       try {
         await db.execute("DELETE FROM gastos WHERE fecha >= ? AND fecha <= ?", [desde, hasta]);
         for (const g of data) {
+          const diasSupabase = g.dias_aplicados ? (typeof g.dias_aplicados === 'string' ? g.dias_aplicados : JSON.stringify(g.dias_aplicados)) : null;
+          const diasAplicados = mapaDias[g.id] || diasSupabase || null;
           const metodoPago = mapaPago[g.id] || g.metodo_pago || 'efectivo';
-          const fechaIngreso = mapaIngreso[g.id] || null;
-          const diasAplicados = mapaDias[g.id] || null;
+          const fechaIngreso = mapaIngreso[g.id] || g.fecha_ingreso || null;
           await db.execute(
             "INSERT INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, metodo_pago, sincronizado, dias_aplicados, fecha_ingreso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, metodoPago, diasAplicados, fechaIngreso]
           );
-          // Fusionar datos locales en el objeto de retorno
-          if (mapaDias[g.id]) g.dias_aplicados = JSON.parse(mapaDias[g.id]);
+          g.dias_aplicados = (() => {
+            if (mapaDias[g.id]) return JSON.parse(mapaDias[g.id]);
+            if (g.dias_aplicados) return Array.isArray(g.dias_aplicados) ? g.dias_aplicados : JSON.parse(g.dias_aplicados);
+            return null;
+          })();
           if (mapaPago[g.id]) g.metodo_pago = mapaPago[g.id];
           if (mapaIngreso[g.id]) g.fecha_ingreso = mapaIngreso[g.id];
         }
@@ -1240,6 +1262,10 @@ export async function getGastos(desde, hasta) {
 
 export async function registrarGasto(gasto) {
   const db = await Database.load("sqlite:cd_electronica.db");
+  const diasAplicados = gasto.dias_aplicados?.length > 0 ? gasto.dias_aplicados : null;
+  const metodoPago = gasto.metodo_pago || 'efectivo';
+  const fechaIngreso = gasto.fecha_ingreso || new Date().toISOString();
+
   const supabasePayload = {
     fecha: gasto.fecha, 
     descripcion: (gasto.descripcion || 'GASTO SIN DESCRIPCIÓN').toUpperCase(),
@@ -1247,15 +1273,15 @@ export async function registrarGasto(gasto) {
     categoria: gasto.categoria || 'VARIOS',
     local_id: gasto.local_id ? parseInt(gasto.local_id) : null,
     usuario_id: gasto.usuario_id ? parseInt(gasto.usuario_id) : null,
+    metodo_pago: metodoPago,
+    fecha_ingreso: fechaIngreso,
+    dias_aplicados: diasAplicados,
   };
-  const metodoPago = gasto.metodo_pago || 'efectivo';
-  const fechaIngreso = gasto.fecha_ingreso || new Date().toISOString();
-  const diasAplicados = gasto.dias_aplicados?.length > 0 ? JSON.stringify(gasto.dias_aplicados) : null;
 
   const guardarGastoOffline = async () => {
     await db.execute(
       "INSERT INTO gastos_pendientes (payload, fecha) VALUES (?, ?)",
-      [JSON.stringify({ ...supabasePayload, metodo_pago: metodoPago, fecha_ingreso: fechaIngreso, dias_aplicados: gasto.dias_aplicados, sincronizado: 1 }), new Date().toISOString()]
+      [JSON.stringify({ ...supabasePayload, sincronizado: 1 }), new Date().toISOString()]
     );
     return { offline: true };
   };
@@ -1266,18 +1292,34 @@ export async function registrarGasto(gasto) {
     const { data, error } = await supabase.from('gastos').insert([supabasePayload]).select().single();
     if (error) throw error;
     const g = data;
+    const diasStr = diasAplicados ? JSON.stringify(diasAplicados) : null;
     await db.execute(
       "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados, metodo_pago, fecha_ingreso) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasAplicados, metodoPago, fechaIngreso]
+      [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, diasStr, metodoPago, fechaIngreso]
     );
-    return { ...g, dias_aplicados: gasto.dias_aplicados, metodo_pago: metodoPago, fecha_ingreso: fechaIngreso };
+    return { ...g, dias_aplicados: diasAplicados, metodo_pago: metodoPago, fecha_ingreso: fechaIngreso };
   } catch (error) {
     if (checkOfflineError(error)) return await guardarGastoOffline();
+    // Si falla por columna faltante en Supabase, reintentar sin columnas extra
+    if (error?.code === 'PGRST204' || error?.message?.includes('Could not find')) {
+      delete supabasePayload.dias_aplicados;
+      delete supabasePayload.fecha_ingreso;
+      delete supabasePayload.metodo_pago;
+      const { data, error: err2 } = await supabase.from('gastos').insert([supabasePayload]).select().single();
+      if (err2) throw err2;
+      const g = data;
+      await db.execute(
+        "INSERT OR REPLACE INTO gastos (id, fecha, descripcion, monto, categoria, local_id, usuario_id, sincronizado, dias_aplicados, metodo_pago, fecha_ingreso) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        [g.id, g.fecha, g.descripcion, g.monto, g.categoria, g.local_id, g.usuario_id, JSON.stringify(diasAplicados), metodoPago, fechaIngreso]
+      );
+      return { ...g, dias_aplicados: diasAplicados, metodo_pago: metodoPago, fecha_ingreso: fechaIngreso };
+    }
     throw error;
   }
 }
 
 export async function actualizarGasto(id, cambios) {
+  const diasAplicados = cambios.dias_aplicados?.length > 0 ? cambios.dias_aplicados : null;
   const supabasePayload = {
     fecha: cambios.fecha,
     descripcion: cambios.descripcion?.toUpperCase(),
@@ -1285,16 +1327,23 @@ export async function actualizarGasto(id, cambios) {
     categoria: cambios.categoria,
     local_id: cambios.local_id ? parseInt(cambios.local_id) : null,
     usuario_id: cambios.usuario_id ? parseInt(cambios.usuario_id) : null,
+    metodo_pago: cambios.metodo_pago || 'efectivo',
+    fecha_ingreso: cambios.fecha_ingreso || null,
+    dias_aplicados: diasAplicados,
   };
-  const metodoPago = cambios.metodo_pago || 'efectivo';
-  const fechaIngreso = cambios.fecha_ingreso || null;
-  const diasAplicados = cambios.dias_aplicados?.length > 0 ? JSON.stringify(cambios.dias_aplicados) : null;
-  const { error } = await supabase.from('gastos').update(supabasePayload).eq('id', id);
+  const columnasExtra = ['dias_aplicados', 'fecha_ingreso', 'metodo_pago'];
+  let { error } = await supabase.from('gastos').update(supabasePayload).eq('id', id);
+  // Fallback si faltan columnas en Supabase
+  if (error && (error?.code === 'PGRST204' || error?.message?.includes('Could not find'))) {
+    for (const col of columnasExtra) delete supabasePayload[col];
+    const r = await supabase.from('gastos').update(supabasePayload).eq('id', id);
+    error = r.error;
+  }
   if (error) throw error;
   const db = await Database.load("sqlite:cd_electronica.db");
   await db.execute(
     "UPDATE gastos SET fecha = ?, descripcion = ?, monto = ?, categoria = ?, local_id = ?, usuario_id = ?, metodo_pago = ?, dias_aplicados = ?, fecha_ingreso = ? WHERE id = ?",
-    [supabasePayload.fecha, supabasePayload.descripcion, supabasePayload.monto, supabasePayload.categoria, supabasePayload.local_id, supabasePayload.usuario_id, metodoPago, diasAplicados, fechaIngreso, id]
+    [supabasePayload.fecha, supabasePayload.descripcion, supabasePayload.monto, supabasePayload.categoria, supabasePayload.local_id, supabasePayload.usuario_id, supabasePayload.metodo_pago || 'efectivo', JSON.stringify(diasAplicados), supabasePayload.fecha_ingreso || null, id]
   );
 }
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { getVentasResumen, getGastos, getLocales, registrarGasto, eliminarGasto, actualizarGasto } from '../services/negocio'
 import { Icon, Badge, toast, ConfirmDialog } from '../components/UI'
 import { exportarGastosExcel } from '../services/exportExcel'
+import Database from '@tauri-apps/plugin-sql'
 
 const fmt = v => '$' + Number(v || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -78,7 +79,7 @@ export default function Gastos({ usuario, config }) {
   const [sortGastos, setSortGastos] = useState({ key: 'descripcion', direction: 'asc' })
   const [sortRendimiento, setSortRendimiento] = useState({ key: 'dia', direction: 'asc' })
 
-  const estadoInicial = { descripcion: '', monto: '', metodo_pago: 'efectivo', dias_aplicados: [] }
+  const estadoInicial = { descripcion: '', monto: '', metodo_pago: 'efectivo', dias_aplicados: [], fecha_ingreso: '' }
 
   useEffect(() => { cargarDatos() }, [mesActual, anioActual, filtroLocal])
 
@@ -104,25 +105,38 @@ async function cargarDatos() {
   const ultimoDia = new Date(anioActual, mesActual + 1, 0).getDate();
   const hasta = `${anioActual}-${String(mesActual + 1).padStart(2, '0')}-${ultimoDia}`;
 
+  // Ventas desde Supabase (consulta liviana: sin join a productos, limit 100)
   try {
-    console.log("Cargando ventas...");
-    const v = await getVentasResumen({ localId: filtroLocal || null, fechaDesde: desde, fechaHasta: hasta });
+    const v = await getVentasResumen({ localId: filtroLocal || null, fechaDesde: desde, fechaHasta: hasta, limit: 100 });
     if (v) setVentas(v);
   } catch (err) {
     console.error("Error en ventas:", err?.message || err);
   }
 
+  // Gastos desde SQLite local (getGastos sincroniza a SQLite)
+  let gastosCargados = false;
   try {
-    console.log("Cargando gastos...");
-    const g = await getGastos(desde, hasta);
-    if (g) setGastos(g);
-  } catch (err) {
-    const msg = (err && err.message) || String(err) || 'Error desconocido';
-    console.error("Error en gastos:", msg);
-    toast("Error al cargar gastos: " + msg, "error");
-  } finally {
-    setLoading(false);
+    const db = await Database.load("sqlite:cd_electronica.db");
+    const gastosLocal = await db.select("SELECT * FROM gastos WHERE fecha >= ? AND fecha <= ? ORDER BY fecha DESC", [desde, hasta]);
+    for (const g of gastosLocal) {
+      if (g.dias_aplicados && typeof g.dias_aplicados === 'string') g.dias_aplicados = JSON.parse(g.dias_aplicados);
+    }
+    if (gastosLocal.length > 0) { setGastos(gastosLocal); gastosCargados = true; }
+  } catch (e) { console.error("Error leyendo gastos de SQLite:", e); }
+
+  // Fallback a Supabase si no hay gastos locales
+  if (!gastosCargados) {
+    try {
+      const g = await getGastos(desde, hasta);
+      if (g) setGastos(g);
+    } catch (err) {
+      const msg = (err && err.message) || String(err) || 'Error desconocido';
+      console.error("Error en gastos:", msg);
+      toast("Error al cargar gastos: " + msg, "error");
+    }
   }
+
+  setLoading(false);
 }
 
   // --- LÓGICA DE SELECCIÓN RÁPIDA ---
@@ -169,7 +183,7 @@ async function cargarDatos() {
       else await registrarGasto(payload)
       toast(data.id ? "Gasto actualizado" : "Gasto registrado")
       cerrarModal()
-      cargarDatos()
+      cargarDatos(true)
     } catch (err) { console.error("Error guardando gasto:", err); toast("Error: " + (err.message || err), "error") } finally { setLoading(false) }
   }
 
@@ -178,7 +192,7 @@ async function cargarDatos() {
     try {
       await eliminarGasto(eliminarId)
       setEliminarId(null)
-      cargarDatos()
+      cargarDatos(true)
       toast("Gasto eliminado")
     } catch (err) { toast("Error", "error") }
   }
@@ -372,11 +386,11 @@ async function cargarDatos() {
                   <tr key={d} style={{ ...styles.tr, opacity: esFuturo ? 0.4 : 1 }}>
                     <td style={{ ...styles.td, fontWeight: 700 }}>Día {d}</td>
                     <td style={{ ...styles.td, textAlign: 'right', color: '#2563eb' }}>
-                      <span onClick={() => totalVentasDia > 0 && setDetalleVentasDia({ dia: d, ventas: ventasDia })} style={{ cursor: totalVentasDia > 0 ? 'pointer' : 'default', textDecoration: totalVentasDia > 0 ? 'underline' : 'none', textDecorationStyle: 'dotted' }}>{fmt(totalVentasDia)}</span>
+                      <span onClick={() => totalVentasDia > 0 && setDetalleVentasDia({ dia: d, ventas: ventasDia })} style={{ cursor: totalVentasDia > 0 ? 'pointer' : 'default', textDecorationLine: totalVentasDia > 0 ? 'underline' : 'none', textDecorationStyle: totalVentasDia > 0 ? 'dotted' : 'none' }}>{fmt(totalVentasDia)}</span>
                     </td>
                     <td style={{ ...styles.td, textAlign: 'right', color: ganDia >= 0 ? UI.statGanancia : UI.statGastos }}>{fmt(ganDia)}</td>
                     <td style={{ ...styles.td, textAlign: 'right', color: UI.statGastos }}>
-                      <span onClick={() => gDia > 0 && setDetalleDia({ dia: d, gastos: getGastosDetalleParaDia(d) })} style={{ cursor: gDia > 0 ? 'pointer' : 'default', textDecoration: gDia > 0 ? 'underline' : 'none', textDecorationStyle: 'dotted' }}>{fmt(gDia)}</span>
+                      <span onClick={() => gDia > 0 && setDetalleDia({ dia: d, gastos: getGastosDetalleParaDia(d) })} style={{ cursor: gDia > 0 ? 'pointer' : 'default', textDecorationLine: gDia > 0 ? 'underline' : 'none', textDecorationStyle: gDia > 0 ? 'dotted' : 'none' }}>{fmt(gDia)}</span>
                     </td>
                     <td style={{ ...styles.td, textAlign: 'right', fontWeight: 800, color: bal >= 0 ? UI.statGanancia : UI.statGastos }}>
                       {fmt(bal)}
