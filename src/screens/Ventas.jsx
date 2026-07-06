@@ -105,11 +105,11 @@ const [filtroModelo, setFiltroModelo] = useState('')
   const [ticketModal, setTicketModal] = useState(null)
   const [showLocalModal, setShowLocalModal] = useState(false)
   const [localConfig, setLocalConfig] = useState({ id: null, nombre: 'Cargando local...' });
-  const [manualData, setManualData] = useState({ concepto: '', precio: '' })
+  const [manualData, setManualData] = useState({ concepto: '', precio: '', costo: '' })
   const [mixtoData, setMixtoData] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
 
   const [showRecargaModal, setShowRecargaModal] = useState(false)
-  const [recargaMonto, setRecargaMonto] = useState('')
+  const [recargaData, setRecargaData] = useState({ carga: '', diferencia: '' })
 
   const [showNdModal, setShowNdModal] = useState(false)
   const [ndData, setNdData] = useState({ concepto: '', monto: '' })
@@ -127,7 +127,9 @@ const [filtroModelo, setFiltroModelo] = useState('')
   const [ncBusqueda, setNcBusqueda] = useState('')
   const [ncResultados, setNcResultados] = useState([])
   const [ncMotivo, setNcMotivo] = useState('')
+  const [ncMontoManual, setNcMontoManual] = useState('')
   const ncTimer = useRef(null)
+  const ncMontoRef = useRef(null)
   const precioRef = useRef(null)
   const recargaRef = useRef(null)
 
@@ -410,6 +412,24 @@ function agregarANC(prod) {
   })
 }
 
+function agregarNcManual() {
+  const monto = parsePrecio(ncMontoManual);
+  if (isNaN(monto) || monto <= 0) return toast('Ingresá un monto válido', 'error');
+  setNcCarrito(prev => [...prev, {
+    producto_id: null,
+    nombre: `NOTA DE CRÉDITO $${monto.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
+    marca: '',
+    modelo: '',
+    precio_unitario: monto,
+    precio_costo: 0,
+    cantidad: 1,
+    esManual: true,
+    fecha_compra: ''
+  }]);
+  setNcMontoManual('');
+  ncMontoRef.current?.focus();
+}
+
 async function confirmarNotaCredito() {
   if (isSubmitting.current) return
   if (ncCarrito.length === 0) return toast('Agregá al menos un producto', 'error')
@@ -430,7 +450,8 @@ async function confirmarNotaCredito() {
         precio_unitario: item.precio_unitario,
         precio_costo: item.precio_costo || 0,
         cantidad: item.cantidad,
-        fecha_compra: item.fecha_compra || null
+        fecha_compra: item.fecha_compra || null,
+        es_manual: item.esManual || false
       })),
       motivo: ncMotivo.trim()
     })
@@ -440,9 +461,10 @@ async function confirmarNotaCredito() {
     const totalNc = ncCarrito.reduce((s, i) => s + i.cantidad * i.precio_unitario, 0)
     setTicketModal({ total: -totalNc, esNotaCredito: true })
     setNcCarrito([])
-    setNcBusqueda('')
-    setNcMotivo('')
-    setShowNcModal(false)
+  setNcBusqueda('')
+  setNcMotivo('')
+  setNcMontoManual('')
+  setShowNcModal(false)
 
     actualizarResumen()
     toast('Nota de Crédito registrada correctamente')
@@ -563,52 +585,8 @@ async function confirmarVentaFinal() {
     });
   };
 
-  const handleRecargaMontoChange = (e) => {
-    const input = e.target;
-    const cursorPos = input.selectionStart;
-    const raw = e.target.value;
-
-    const rawBefore = raw.slice(0, cursorPos).replace(/[^\d,\-]/g, '');
-    const relevantLen = rawBefore.length;
-
-    let cleaned = raw.replace(/[^\d,\-]/g, '');
-    const isNegative = cleaned.startsWith('-') ? '-' : '';
-    if (isNegative) cleaned = cleaned.slice(1);
-
-    const commaIdx = cleaned.indexOf(',');
-    let intPart = cleaned;
-    let decPart = '';
-    if (commaIdx !== -1) {
-      intPart = cleaned.slice(0, commaIdx);
-      decPart = cleaned.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2);
-    }
-
-    const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-    let result = isNegative + formattedInt;
-    if (commaIdx !== -1 || raw.endsWith(',')) {
-      result += ',' + decPart;
-    }
-
-    let newCursor = result.length;
-    if (relevantLen === 0) {
-      newCursor = 0;
-    } else {
-      let count = 0;
-      for (let i = 0; i < result.length; i++) {
-        if (/[\d,\-]/.test(result[i])) count++;
-        if (count >= relevantLen) { newCursor = i + 1; break; }
-      }
-    }
-
-    if (result !== recargaMonto) {
-      setRecargaMonto(result);
-    }
-    requestAnimationFrame(() => {
-      if (input === document.activeElement) {
-        input.selectionStart = input.selectionEnd = newCursor;
-      }
-    });
-  };
+  const handleRecargaCargaChange = (e) => setRecargaData(prev => ({ ...prev, carga: e.target.value }));
+  const handleRecargaDiferenciaChange = (e) => setRecargaData(prev => ({ ...prev, diferencia: e.target.value }));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 16, background: UI.pageBg, color: UI.pageText, padding: 12, borderRadius: 12, position: 'relative' }}>
@@ -946,7 +924,24 @@ async function confirmarVentaFinal() {
           fontWeight: '800',
           color: parsePrecio(manualData.precio) < 0 ? '#dc2626' : '#16a34a'
         }} 
-      /><VentaButton ui={UI} onClick={() => {
+      />
+      {!esVendedor && <div style={{ fontSize: 13, color: '#666', marginBottom: -10 }}>Costo (opcional)</div>}
+      {!esVendedor && <input 
+        type="text" 
+        inputMode="decimal"
+        value={manualData.costo}
+        onChange={e => setManualData({...manualData, costo: e.target.value})}
+        placeholder="0,00"
+        style={{ 
+          height: 44, 
+          padding: '0 12px', 
+          borderRadius: 8, 
+          border: '1px solid #ccc',
+          fontWeight: '800',
+          color: '#666'
+        }} 
+      />}
+      <VentaButton ui={UI} onClick={() => {
         const conceptoOk = manualData.concepto && manualData.concepto.trim() !== '';
         const precioOk = manualData.precio !== '' && !isNaN(parsePrecio(manualData.precio));
 
@@ -954,20 +949,18 @@ async function confirmarVentaFinal() {
           return toast('Por favor, ingresa descripción y monto', 'error');
         }
         
-        // Creamos el objeto con el nombre que el usuario escribió
         const nuevoAjuste = { 
           id: `MANUAL-${Date.now()}`, 
-  nombre: manualData.concepto.trim().toUpperCase(), 
-  precio_venta: parsePrecio(manualData.precio), // registrarVenta usa precio_unitario, ojo ahí
-  stockActual: 9999,
-  esManual: true
+          nombre: manualData.concepto.trim().toUpperCase(), 
+          precio_venta: parsePrecio(manualData.precio),
+          precio_costo: parsePrecio(manualData.costo) || 0,
+          stockActual: 9999,
+          esManual: true
         };
-  // 3. Lo mandamos a la función que ya tenías
   agregarAlCarrito(nuevoAjuste);
 
-  // 4. Limpiamos y cerramos
   setShowManualModal(false); 
-  setManualData({ concepto: '', precio: '' });
+  setManualData({ concepto: '', precio: '', costo: '' });
 }}>
   AGREGAR AJUSTE
 </VentaButton>
@@ -978,32 +971,48 @@ async function confirmarVentaFinal() {
       {showRecargaModal && (
   <VentaModal title="Recarga" onClose={() => setShowRecargaModal(false)} ui={UI}>
     <div className="col" style={{ gap: 15 }}>
-      <div style={{ fontSize: 13, color: '#666' }}>Monto de la recarga</div>
+      <div style={{ fontSize: 13, color: '#666' }}>Carga</div>
       <input 
         ref={recargaRef}
         type="text" 
         inputMode="decimal"
-        value={recargaMonto}
-        onChange={handleRecargaMontoChange}
+        value={recargaData.carga}
+        onChange={handleRecargaCargaChange}
         placeholder="0,00"
         style={{ height: 44, padding: '0 12px', borderRadius: 8, border: '1px solid #ccc', fontWeight: '800', fontSize: 18 }}
       />
+      <div style={{ fontSize: 13, color: '#666' }}>Diferencia</div>
+      <input 
+        type="text" 
+        inputMode="decimal"
+        value={recargaData.diferencia}
+        onChange={handleRecargaDiferenciaChange}
+        placeholder="0,00"
+        style={{ height: 44, padding: '0 12px', borderRadius: 8, border: '1px solid #ccc', fontWeight: '800', fontSize: 18 }}
+      />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 15, fontWeight: 800, color: '#2563eb', padding: '0 4px' }}>
+        <span>Total a cobrar:</span>
+        <span>{fmt((parsePrecio(recargaData.carga) || 0) + (parsePrecio(recargaData.diferencia) || 0))}</span>
+      </div>
       <VentaButton ui={UI} onClick={() => {
-        const monto = parsePrecio(recargaMonto);
-        if (isNaN(monto) || monto <= 0) return toast('Ingresa un monto válido', 'error');
+        const carga = parsePrecio(recargaData.carga);
+        const diferencia = parsePrecio(recargaData.diferencia);
+        if (isNaN(carga) || carga <= 0) return toast('Ingresá una carga válida', 'error');
+        if (isNaN(diferencia) || diferencia < 0) return toast('Ingresá una diferencia válida', 'error');
 
+        const total = carga + diferencia;
         const item = {
           id: `RECARGA-${Date.now()}`,
-          nombre: `RECARGA $${monto.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
-          precio_venta: monto,
-          precio_costo: monto * 0.9,
+          nombre: `RECARGA $${total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
+          precio_venta: total,
+          precio_costo: carga,
           stockActual: 9999,
           esRecarga: true,
           esManual: true,
         };
         agregarAlCarrito(item);
         setShowRecargaModal(false);
-        setRecargaMonto('');
+        setRecargaData({ carga: '', diferencia: '' });
       }}>
         AGREGAR RECARGA
       </VentaButton>
@@ -1159,6 +1168,28 @@ async function confirmarVentaFinal() {
                 </div>
               </div>
             )}
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                ref={ncMontoRef}
+                type="text"
+                inputMode="decimal"
+                value={ncMontoManual}
+                onChange={e => setNcMontoManual(e.target.value)}
+                placeholder="Monto manual..."
+                style={{ flex: 1, height: 44, borderRadius: 8, border: '2px solid #f59e0b', padding: '0 12px', fontSize: 15, fontWeight: 800 }}
+                onKeyDown={e => e.key === 'Enter' && agregarNcManual()}
+              />
+              <button onClick={agregarNcManual}
+                style={{ height: 44, padding: '0 16px', borderRadius: 8, border: 'none', background: '#f59e0b', color: '#fff', fontWeight: 800, fontSize: 14, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                AGREGAR
+              </button>
+            </div>
+
+            <div style={{ position: 'relative', textAlign: 'center' }}>
+              <hr style={{ border: 'none', borderTop: '1px solid #e5e7eb' }} />
+              <span style={{ position: 'absolute', top: -8, left: '50%', transform: 'translateX(-50%)', background: '#fff', padding: '0 8px', color: '#999', fontSize: 11, fontWeight: 600 }}>O</span>
+            </div>
 
             <input
               value={ncBusqueda}

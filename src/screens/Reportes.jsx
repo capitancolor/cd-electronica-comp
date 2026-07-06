@@ -295,13 +295,10 @@ export default function Reportes({ usuario, config }) {
   const totalPeriodo = listaAMostrar.reduce((s, v) => s + Number(v.total || 0), 0)
   const gananciaTotal = listaAMostrar.reduce((acc, v) => {
     const base = Number(v.total || 0) - Number(v.costo_total || 0);
-    const recargaExtra = (v.venta_items || [])
-      .filter(i => !i.producto_id && i.descripcion?.startsWith('RECARGA'))
-      .reduce((s, i) => s + i.cantidad * i.precio_unitario * 0.90, 0);
     const notaDebito = (v.venta_items || [])
       .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
       .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
-    return acc + base - recargaExtra - notaDebito;
+    return acc + base - notaDebito;
   }, 0)
   const costoTotalPeriodo = listaAMostrar.reduce((s, v) => s + Number(v.costo_total || 0), 0)
   const efectivoTotal = listaAMostrar.reduce((s, v) => {
@@ -422,13 +419,10 @@ export default function Reportes({ usuario, config }) {
       listaAMostrar.map(v => {
         const costo = Number(v.costo_total || 0);
         const precio = Number(v.total || 0);
-        const recargaExtra = (v.venta_items || [])
-          .filter(i => !i.producto_id && i.descripcion?.startsWith('RECARGA'))
-          .reduce((s, i) => s + i.cantidad * i.precio_unitario * 0.90, 0);
         const notaDebito = (v.venta_items || [])
           .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
           .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
-        const ganancia = precio - costo - recargaExtra - notaDebito;
+        const ganancia = precio - costo - notaDebito;
         return (
           <tr key={v.id} style={{ background: UI.rowBg, borderBottom: `1px solid ${UI.rowBorder}` }}>
             <td style={{ padding: 14, color: UI.dateText, fontSize: 11, fontWeight: 600 }}>
@@ -663,6 +657,7 @@ export default function Reportes({ usuario, config }) {
                       modelo: p.modelo || '',
                       cantidad: 1,
                       precio_unitario: Number(p.precio_venta || 0),
+                      precio_costo: Number(p.precio_costo || 0),
                       descripcion: p.nombre,
                       es_manual: false
                     }]);
@@ -737,6 +732,20 @@ export default function Reportes({ usuario, config }) {
                   style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13, boxSizing: 'border-box' }}
                 />
               </div>
+              {!esVendedor && <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10, fontWeight: 700, color: '#666', display: 'block', marginBottom: 2 }}>COSTO UNIT.</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={item.precio_costo ?? 0}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value) || 0;
+                    setEditItems(prev => prev.map((it, idx) => idx === i ? { ...it, precio_costo: val } : it));
+                  }}
+                  style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 13, boxSizing: 'border-box' }}
+                />
+              </div>}
               <div style={{ flex: '0 0 70px', textAlign: 'right' }}>
                 <label style={{ fontSize: 10, fontWeight: 700, color: '#666', display: 'block', marginBottom: 2 }}>SUB</label>
                 <span style={{ fontSize: 13, fontWeight: 900, color: '#2563eb' }}>{fmt((item.cantidad || 0) * (item.precio_unitario || 0))}</span>

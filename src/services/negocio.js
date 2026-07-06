@@ -1145,7 +1145,8 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
     const { error: errInsert } = await supabase.from('venta_items').insert(detalleInsert);
     if (errInsert) throw errInsert;
 
-    // 4. Actualizar total y snapshot de la venta
+    // 4. Actualizar total, costo y snapshot de la venta
+    const nuevoCostoTotal = items.reduce((sum, i) => sum + (i.cantidad || 0) * (i.precio_costo || 0), 0);
     const itemsSnapshot = items.map(item => ({
       producto_id: item.producto_id,
       nombre: item.nombre || item.descripcion || 'Producto',
@@ -1160,7 +1161,7 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
       .update({
         total: newTotal,
         metodo_pago: metodoPago || venta.metodo_pago,
-        detalle_mixto: { ...detalleActual, items_snapshot: itemsSnapshot },
+        detalle_mixto: { ...detalleActual, costo_proporcional: nuevoCostoTotal, items_snapshot: itemsSnapshot },
         ...(fecha ? { fecha } : {})
       })
       .eq('id', ventaId);
@@ -1174,8 +1175,8 @@ export async function actualizarVenta({ ventaId, items, localId, usuarioId, meto
         [ventaId, it.producto_id, it.nombre || it.descripcion || "Producto", it.cantidad, it.precio_unitario, it.precio_costo || 0]
       );
     }
-    const updateParts = ['total = ?', 'productos_nombres = ?'];
-    const updateParams = [newTotal, items.map(i => i.nombre || i.descripcion).filter(Boolean).join(', ')];
+    const updateParts = ['total = ?', 'costo_total = ?', 'productos_nombres = ?'];
+    const updateParams = [newTotal, nuevoCostoTotal, items.map(i => i.nombre || i.descripcion).filter(Boolean).join(', ')];
     if (fecha) {
       updateParts.push('fecha = ?');
       updateParams.push(fecha);
