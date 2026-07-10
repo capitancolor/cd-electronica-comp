@@ -1430,7 +1430,10 @@ export async function getReparaciones(busqueda = '') {
         if (tr && !r.arreglo) r.arreglo = tr[1].trim();
       }
       const repuestos = r.repuestos ? (typeof r.repuestos === 'string' ? JSON.parse(r.repuestos) : r.repuestos) : [];
-      return { ...r, precio: r.precio || 0, total: r.precio || r.costo || 0, repuestos };
+      const precio = r.precio || 0;
+      const costoRepuestos = repuestos.reduce((sum, r) => sum + (Number(r.precio_costo) || 0) * r.cantidad, 0);
+      const costo = (r.costo || 0) + costoRepuestos;
+      return { ...r, precio, costo, total: precio + costoRepuestos, repuestos };
     });
   } catch (error) {
     console.error("Error leyendo reparaciones de SQLite:", error);
@@ -1445,12 +1448,12 @@ export async function guardarReparacion(reparacion) {
     fecha: reparacion.fecha || new Date().toISOString(),
     cliente: reparacion.cliente?.trim(),
     equipo: reparacion.equipo?.trim(),
-    problema: `
-MARCA/MODELO: ${reparacion.marca || ''} ${reparacion.modelo || ''}
-FALLA: ${reparacion.problema || ''}
-ACCESORIOS: ${reparacion.accesorios || ''}
-TRABAJO: ${reparacion.arreglo || ''}
-    `.trim(),
+    problema: [
+      (reparacion.marca || reparacion.modelo) ? `MARCA/MODELO: ${reparacion.marca || ''} ${reparacion.modelo || ''}` : null,
+      reparacion.problema ? `FALLA: ${reparacion.problema}` : null,
+      reparacion.accesorios ? `ACCESORIOS: ${reparacion.accesorios}` : null,
+      reparacion.arreglo ? `TRABAJO: ${reparacion.arreglo}` : null,
+    ].filter(Boolean).join('\n'),
     estado: reparacion.id ? (reparacion.estado || 'En Progreso') : 'En Progreso',
     precio: parseFloat(String(reparacion.precio || '0').replace(/\./g, '').replace(',', '.')),
     costo: parseFloat(String(reparacion.costo || '0').replace(/\./g, '').replace(',', '.')),
@@ -2466,6 +2469,7 @@ export async function sincronizarTablasMaestras() {
         console.log("✅ Sincronización maestra finalizada protegiendo datos locales.");
     } catch (error) {
         console.error("Error sincronizando maestros:", error);
+        try { await db.execute("ROLLBACK"); } catch (_) {}
         throw error; // Importante para que el try/catch de App.jsx se entere del fallo
     }
 }
@@ -2630,7 +2634,8 @@ export async function registrarPagoReparacion({ reparacionId, localId, usuarioId
   if (!reparacion) throw new Error("Reparación no encontrada");
 
   const repuestos = reparacion.repuestos ? JSON.parse(reparacion.repuestos) : [];
-  const totalBase = reparacion.precio || reparacion.costo || 0;
+  const costoRepuestos = repuestos.reduce((sum, r) => sum + (Number(r.precio_costo) || 0) * r.cantidad, 0);
+  const totalBase = (reparacion.precio || 0) + costoRepuestos;
   const totalFinal = totalFinalParam ?? totalBase;
 
   const itemsRepuesto = repuestos.map(r => ({
@@ -2639,7 +2644,7 @@ export async function registrarPagoReparacion({ reparacionId, localId, usuarioId
     precio_unitario: 0,
     cantidad: r.cantidad,
     es_manual: false,
-    precio_costo: 0
+    precio_costo: Number(r.precio_costo) || 0
   }));
 
   const descripcion = `REPARACIÓN: ${reparacion.cliente} - ${reparacion.equipo}`;
@@ -2649,14 +2654,14 @@ export async function registrarPagoReparacion({ reparacionId, localId, usuarioId
     precio_unitario: totalBase,
     cantidad: 1,
     es_manual: true,
-    precio_costo: 0
+    precio_costo: (reparacion.costo || 0) + costoRepuestos
   };
 
   const items = [itemReparacion, ...itemsRepuesto];
 
   const detalleMixto = metodoPago === 'mixto'
-    ? { ...(detalleMixtoParam || {}), es_reparacion: true, costo_reparacion: reparacion.costo || 0 }
-    : { es_reparacion: true, costo_reparacion: reparacion.costo || 0 };
+    ? { ...(detalleMixtoParam || {}), es_reparacion: true, costo_reparacion: (reparacion.costo || 0) + costoRepuestos }
+    : { es_reparacion: true, costo_reparacion: (reparacion.costo || 0) + costoRepuestos };
 
   // Marcar reparación como cobrada en local ANTES de registrarVenta
   // (para que si el stock se descuente offline, quede registrado)

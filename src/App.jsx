@@ -36,9 +36,14 @@ export default function App() {
 
   // --- LÓGICA DE SINCRONIZACIÓN ORDENADA (PUSH -> PULL) ---
   const lastSyncRef = useRef(0);
+  const syncingRef = useRef(false);
 
 const ejecutarSincroCompleta = async () => {
     if (!navigator.onLine) return;
+    if (syncingRef.current) {
+      console.log("⏱️ Sync omitido: ya hay una sincronización en curso");
+      return;
+    }
     
     // Prevenir sync loop: mínimo 30 segundos entre sincros automáticas
     const now = Date.now();
@@ -47,6 +52,7 @@ const ejecutarSincroCompleta = async () => {
       return;
     }
     lastSyncRef.current = now;
+    syncingRef.current = true;
 
     try {
       setSyncing(true);
@@ -77,6 +83,7 @@ const ejecutarSincroCompleta = async () => {
     } catch (error) {
       console.warn("⚠️ Sincro abortada para proteger el stock local:", error.message);
     } finally {
+      syncingRef.current = false;
       setSyncing(false);
     }
   };

@@ -122,6 +122,7 @@ const [filtroModelo, setFiltroModelo] = useState('')
   const [cobrandoRep, setCobrandoRep] = useState(false)
   const [mixtoDataRep, setMixtoDataRep] = useState({ efectivo: '', tarjeta: '', transferencia: '' })
 
+  const esVendedor = usuario?.rol === 'vendedor'
   const [showNcModal, setShowNcModal] = useState(false)
   const [ncCarrito, setNcCarrito] = useState([])
   const [ncBusqueda, setNcBusqueda] = useState('')

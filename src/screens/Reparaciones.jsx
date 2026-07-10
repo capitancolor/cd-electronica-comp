@@ -177,7 +177,7 @@ export default function Reparaciones({ usuario, config }) {
     if (idx >= 0) {
       lista[idx].cantidad += 1;
     } else {
-      lista.push({ producto_id: prod.id, nombre: prod.nombre, cantidad: 1 });
+      lista.push({ producto_id: prod.id, nombre: prod.nombre, cantidad: 1, precio_costo: Number(prod.precio_costo) || 0 });
     }
     setModal({...modal, data: {...modal.data, repuestos: [...lista]}});
     setRepuestoBusqueda('');
@@ -439,8 +439,10 @@ export default function Reparaciones({ usuario, config }) {
                       <thead>
                         <tr style={{ background: '#e2e8f0' }}>
                           <th style={{ padding: '6px 10px', textAlign: 'left' }}>Producto</th>
-                          <th style={{ padding: '6px 10px', textAlign: 'center', width: 100 }}>Cant.</th>
-                          <th style={{ padding: '6px 10px', textAlign: 'center', width: 50 }}></th>
+                          <th style={{ padding: '6px 10px', textAlign: 'center', width: 80 }}>Cant.</th>
+                          <th style={{ padding: '6px 10px', textAlign: 'right', width: 90 }}>Costo U.</th>
+                          <th style={{ padding: '6px 10px', textAlign: 'right', width: 90 }}>Subtotal</th>
+                          <th style={{ padding: '6px 10px', textAlign: 'center', width: 40 }}></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -454,6 +456,8 @@ export default function Reparaciones({ usuario, config }) {
                                 <button onClick={() => cambiarCantidadRepuesto(r.producto_id, 1)} style={{ border: '1px solid #ccc', background: '#fff', borderRadius: 4, cursor: 'pointer', padding: '2px 5px', fontSize: 12 }}>+</button>
                               </div>
                             </td>
+                            <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 600, color: '#dc2626' }}>${Number(r.precio_costo || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })}</td>
+                            <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 700, color: '#dc2626' }}>${((Number(r.precio_costo) || 0) * r.cantidad).toLocaleString('es-AR', { minimumFractionDigits: 2 })}</td>
                             <td style={{ padding: '6px 10px', textAlign: 'center' }}>
                               <button onClick={() => quitarRepuesto(r.producto_id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', fontSize: 14 }}>✕</button>
                             </td>
@@ -461,6 +465,12 @@ export default function Reparaciones({ usuario, config }) {
                         ))}
                       </tbody>
                     </table>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '8px 10px', background: '#f1f5f9', borderTop: '1px solid #e2e8f0', fontWeight: 800, fontSize: 13 }}>
+                      <span>Total repuestos: </span>
+                      <span style={{ color: '#dc2626', marginLeft: 8 }}>
+                        ${(modal.data.repuestos || []).reduce((s, r) => s + (Number(r.precio_costo) || 0) * r.cantidad, 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
                   </div>
                 )}
 
@@ -562,11 +572,15 @@ export default function Reparaciones({ usuario, config }) {
                   {cobrarReparacion.repuestos.map((r, i) => (
                     <div key={r.producto_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
                       <span>{r.nombre}</span>
-                      <span style={{ fontWeight: 800 }}>x{r.cantidad}</span>
+                      <span style={{ fontWeight: 800 }}>x{r.cantidad} — ${(Number(r.precio_costo) || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })} u.</span>
                     </div>
                   ))}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#92400e', marginTop: 4, fontWeight: 700 }}>
+                    <span>Costo total repuestos:</span>
+                    <span>${cobrarReparacion.repuestos.reduce((s, r) => s + (Number(r.precio_costo) || 0) * r.cantidad, 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span>
+                  </div>
                   <div style={{ fontSize: 11, color: '#92400e', marginTop: 6 }}>
-                    * Los repuestos se descuentan del stock a precio $0 (incluidos en el total de la reparación)
+                    * Los repuestos se descuentan del stock a precio de costo (incluidos en el total)
                   </div>
                 </div>
               )}
