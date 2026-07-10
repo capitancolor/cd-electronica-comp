@@ -12,7 +12,7 @@ import Notas from './screens/Notas'
 import Clientes from './screens/Clientes' 
 import Reparaciones from './screens/Reparaciones'
 // MonitorPrecios removed
-import { inicializarBaseLocal, sincronizarTablasMaestras, sincronizarClientes, sincronizarReparacionesMaestras, procesarVentasPendientes, procesarProductosPendientes, procesarClientesPendientes, congelarVentasAnteriores } from './services/negocio';
+import { inicializarBaseLocal, sincronizarTablasMaestras, sincronizarClientes, sincronizarReparacionesMaestras, procesarVentasPendientes, procesarProductosPendientes, procesarClientesPendientes, procesarTecnicosPendientes, congelarVentasAnteriores } from './services/negocio';
 
 const NAV = [
   { id: 'ventas',       label: 'Nueva Venta',  icon: 'computer', roles: ['admin', 'vendedor'] },
@@ -66,6 +66,9 @@ const ejecutarSincroCompleta = async () => {
 
       await procesarClientesPendientes();
       console.log("⬆️ Clientes pendientes subidos.");
+
+      await procesarTecnicosPendientes();
+      console.log("⬆️ Técnicos pendientes subidos.");
 
       await sincronizarClientes();
       console.log("⬇️ Clientes sincronizados desde la nube.");

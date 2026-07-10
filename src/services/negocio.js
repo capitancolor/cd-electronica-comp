@@ -1815,6 +1815,31 @@ export async function procesarClientesPendientes() {
         }
     } catch (err) { console.error("Error en procesarClientesPendientes:", err); }
 }
+export async function procesarTecnicosPendientes() {
+    if (!window.navigator.onLine) return;
+    try {
+        const db = await Database.load("sqlite:cd_electronica.db");
+        const pendientes = await db.select("SELECT * FROM tecnicos_pendientes WHERE sincronizado = 0");
+
+        for (const row of pendientes) {
+            try {
+                const payload = JSON.parse(row.payload);
+                const { data, error } = await supabase.from('tecnicos').upsert(payload).select().single();
+
+                if (!error && data) {
+                    await db.execute(
+                        "INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)",
+                        [data.id, data.nombre, data.telefono || null, data.especialidad || null]
+                    );
+                    await db.execute("DELETE FROM tecnicos_pendientes WHERE id = ?", [row.id]);
+                    console.log(`Técnico pendiente ID ${row.id} sincronizado.`);
+                } else {
+                    console.warn(`No se pudo sincronizar técnico pendiente ID ${row.id}:`, error?.message);
+                }
+            } catch (err) { console.error("Error subiendo técnico:", err); }
+        }
+    } catch (err) { console.error("Error en procesarTecnicosPendientes:", err); }
+}
 export async function sincronizarClientes() {
     try {
         const db = await Database.load("sqlite:cd_electronica.db");
@@ -2093,6 +2118,15 @@ INSERT OR IGNORE INTO configuracion (clave, valor) VALUES ('local_id', '1');
             );
         `);
 
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS tecnicos_pendientes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                sincronizado INTEGER DEFAULT 0
+            );
+        `);
+
         // --- TABLA CLIENTES ---
         await db.execute(`
             CREATE TABLE IF NOT EXISTS clientes (
@@ -2289,7 +2323,7 @@ export async function sincronizarTablasMaestras() {
         
         const db = await Database.load("sqlite:cd_electronica.db");
 
-        // ─── Primero obtener todos los datos de Supabase (network) ───
+        // ─── FASE 1: Descargar datos de Supabase (network, sin locks) ───
         const [{ data: cats, error: errCats }, { data: provs, error: errProvs }, { data: tecs, error: errTecs }] = await Promise.all([
             supabase.from('categorias').select('*'),
             supabase.from('proveedores').select('*'),
@@ -2299,16 +2333,72 @@ export async function sincronizarTablasMaestras() {
         if (errProvs) throw errProvs;
         if (errTecs) throw errTecs;
 
-        // 3. Sincronizar Productos (mapeando tipos de datos)
         const { data: prods, error: errProds } = await supabase.from('productos')
             .select('*, stock(local_id, cantidad)')
             .eq('activo', true);
             
         if (errProds) throw errProds;
 
-        // ─── Escribir todo a SQLite en una sola transacción ───
+        // ─── FASE 2: Deduplicar productos en Supabase (network, sin locks SQLite) ───
+        if (prods) {
+            const grupos = new Map()
+            for (const p of prods) {
+                const cod = p.codigo?.toString().trim()
+                if (!cod) continue
+                if (!grupos.has(cod)) grupos.set(cod, [])
+                grupos.get(cod).push(p)
+            }
+
+            for (const [cod, dups] of grupos) {
+                if (dups.length <= 1) continue
+                console.warn(`⚠️ Detectados ${dups.length} duplicados para codigo "${cod}". Fusionando...`)
+
+                dups.sort((a, b) => a.id - b.id)
+                const keep = dups[0]
+                const toDelete = dups.slice(1)
+
+                let s1 = keep.stock?.find(s => s.local_id === 1)?.cantidad || 0
+                let s2 = keep.stock?.find(s => s.local_id === 2)?.cantidad || 0
+                for (const dup of toDelete) {
+                    s1 += dup.stock?.find(s => s.local_id === 1)?.cantidad || 0
+                    s2 += dup.stock?.find(s => s.local_id === 2)?.cantidad || 0
+                }
+
+                try {
+                    const stocks = []
+                    if (s1 > 0) stocks.push({ producto_id: keep.id, local_id: 1, cantidad: s1 })
+                    if (s2 > 0) stocks.push({ producto_id: keep.id, local_id: 2, cantidad: s2 })
+                    if (stocks.length > 0) {
+                        await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
+                    }
+                } catch (e) { console.warn("Error actualizando stock fusionado:", e.message) }
+
+                for (const dup of toDelete) {
+                    try { await supabase.from('stock').delete().eq('producto_id', dup.id) } catch (e) {}
+                    try { await supabase.from('productos').delete().eq('id', dup.id) } catch (e) {}
+                }
+
+                const idx = prods.indexOf(keep)
+                if (idx !== -1) {
+                    if (!keep.stock) keep.stock = []
+                    const setL1 = keep.stock.find(s => s.local_id === 1)
+                    const setL2 = keep.stock.find(s => s.local_id === 2)
+                    if (setL1) setL1.cantidad = s1
+                    else if (s1 > 0) keep.stock.push({ local_id: 1, cantidad: s1 })
+                    if (setL2) setL2.cantidad = s2
+                    else if (s2 > 0) keep.stock.push({ local_id: 2, cantidad: s2 })
+                }
+                for (const dup of toDelete) {
+                    const di = prods.indexOf(dup)
+                    if (di !== -1) prods.splice(di, 1)
+                }
+            }
+        }
+
+        // ─── FASE 3: Escribir tablas ligeras (categorías, proveedores, técnicos) ───
         await db.execute("BEGIN TRANSACTION");
-        if (cats) {
+        try {
+            if (cats) {
                 await db.execute("DELETE FROM categorias");
                 for (const c of cats) {
                     await db.execute(
@@ -2329,7 +2419,6 @@ export async function sincronizarTablasMaestras() {
             }
 
             if (tecs) {
-                await db.execute("DELETE FROM tecnicos");
                 for (const t of tecs) {
                     await db.execute(
                         "INSERT OR REPLACE INTO tecnicos (id, nombre, telefono, especialidad) VALUES (?, ?, ?, ?)",
@@ -2337,125 +2426,74 @@ export async function sincronizarTablasMaestras() {
                     );
                 }
             }
-
-        if (prods) {
-            // ─── DEDUPLICAR: agrupar por codigo, fusionar stock, limpiar Supabase ───
-            const grupos = new Map()
-            for (const p of prods) {
-                const cod = p.codigo?.toString().trim()
-                if (!cod) continue
-                if (!grupos.has(cod)) grupos.set(cod, [])
-                grupos.get(cod).push(p)
-            }
-
-            for (const [cod, dups] of grupos) {
-                if (dups.length <= 1) continue
-                console.warn(`⚠️ Detectados ${dups.length} duplicados para codigo "${cod}". Fusionando...`)
-
-                // Ordenar por ID ascendente: el primero es el original
-                dups.sort((a, b) => a.id - b.id)
-                const keep = dups[0]
-                const toDelete = dups.slice(1)
-
-                // Fusionar stock: sumar cantidades de los duplicados al original
-                let s1 = keep.stock?.find(s => s.local_id === 1)?.cantidad || 0
-                let s2 = keep.stock?.find(s => s.local_id === 2)?.cantidad || 0
-                for (const dup of toDelete) {
-                    s1 += dup.stock?.find(s => s.local_id === 1)?.cantidad || 0
-                    s2 += dup.stock?.find(s => s.local_id === 2)?.cantidad || 0
-                }
-
-                // Actualizar stock del producto conservado en Supabase
-                try {
-                    const stocks = []
-                    if (s1 > 0) stocks.push({ producto_id: keep.id, local_id: 1, cantidad: s1 })
-                    if (s2 > 0) stocks.push({ producto_id: keep.id, local_id: 2, cantidad: s2 })
-                    if (stocks.length > 0) {
-                        await supabase.from('stock').upsert(stocks, { onConflict: 'producto_id,local_id' })
-                    }
-                } catch (e) { console.warn("Error actualizando stock fusionado:", e.message) }
-
-                // Eliminar duplicados de Supabase (producto + stock)
-                for (const dup of toDelete) {
-                    try { await supabase.from('stock').delete().eq('producto_id', dup.id) } catch (e) {}
-                    try { await supabase.from('productos').delete().eq('id', dup.id) } catch (e) {}
-                }
-
-                // Reemplazar en el array original
-                const idx = prods.indexOf(keep)
-                if (idx !== -1) {
-                    if (!keep.stock) keep.stock = []
-                    const setL1 = keep.stock.find(s => s.local_id === 1)
-                    const setL2 = keep.stock.find(s => s.local_id === 2)
-                    if (setL1) setL1.cantidad = s1
-                    else if (s1 > 0) keep.stock.push({ local_id: 1, cantidad: s1 })
-                    if (setL2) setL2.cantidad = s2
-                    else if (s2 > 0) keep.stock.push({ local_id: 2, cantidad: s2 })
-                }
-                // Eliminar los duplicados del array
-                for (const dup of toDelete) {
-                    const di = prods.indexOf(dup)
-                    if (di !== -1) prods.splice(di, 1)
-                }
-            }
-
-            // ─── SINCRONIZAR A SQLITE (dentro de la misma transacción) ───
-            // Extraer IDs de productos en ventas pendientes (un solo query en vez de N)
-            const pendientes = await db.select("SELECT payload FROM ventas_pendientes");
-            const pendingProductIds = new Set();
-            for (const row of pendientes) {
-                try {
-                    const pl = JSON.parse(row.payload);
-                    if (pl.producto_id) pendingProductIds.add(pl.producto_id);
-                    if (pl.items) pl.items.forEach(i => pendingProductIds.add(i.producto_id));
-                } catch (_) {}
-            }
-
-            for (const p of prods) {
-                if (pendingProductIds.has(p.id)) {
-                    console.log(`⚠️ Producto ${p.nombre} omitido en sincro por transacción pendiente.`);
-                    continue;
-                }
-
-                const s1 = p.stock?.find(s => s.local_id === 1)?.cantidad || 0;
-                const s2 = p.stock?.find(s => s.local_id === 2)?.cantidad || 0;
-
-                await db.execute(
-                    "DELETE FROM productos WHERE codigo = ? AND id != ?",
-                    [p.codigo, p.id]
-                );
-
-                await db.execute(
-                    `INSERT OR REPLACE INTO productos (
-                        id, codigo, nombre, precio_venta, precio_costo, 
-                        precio_costo_usd, precio_promo, en_promo, 
-                        categoria_id, marca, modelo, activo, 
-                        proveedor_id, stock_l1, stock_l2
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [
-                        p.id, p.codigo, p.nombre, p.precio_venta || 0, p.precio_costo || 0,
-                        p.precio_costo_usd || 0, p.precio_promo || 0, p.en_promo ? 1 : 0, 
-                        p.categoria_id, p.marca, p.modelo, 1, p.proveedor_id, s1, s2
-                    ]
-                );
-            }
-            // ─── LIMPIEZA: productos locales que ya no existen en la nube ───
-            if (prods && prods.length > 0) {
-                const codigosNube = new Set(prods.map(p => p.codigo?.toString().trim()).filter(Boolean))
-                const localesActivos = await db.select(
-                    "SELECT id, codigo FROM productos WHERE activo = 1"
-                )
-                for (const loc of localesActivos) {
-                    const cod = loc.codigo?.toString().trim()
-                    if (cod && !codigosNube.has(cod)) {
-                        await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [loc.id])
-                        console.log(`🧹 Producto local ID ${loc.id} (cod:${cod}) marcado inactivo - no existe en nube`)
-                    }
-                }
-            }
+            await db.execute("COMMIT");
+        } catch (e) {
+            try { await db.execute("ROLLBACK"); } catch (_) {}
+            throw e;
         }
-        // productos sin datos de la nube: solo marcar inactivos si prods es null
-        if (!prods) {
+
+        // ─── FASE 4: Escribir productos (transacción separada) ───
+        if (prods) {
+            await db.execute("BEGIN TRANSACTION");
+            try {
+                const pendientes = await db.select("SELECT payload FROM ventas_pendientes");
+                const pendingProductIds = new Set();
+                for (const row of pendientes) {
+                    try {
+                        const pl = JSON.parse(row.payload);
+                        if (pl.producto_id) pendingProductIds.add(pl.producto_id);
+                        if (pl.items) pl.items.forEach(i => pendingProductIds.add(i.producto_id));
+                    } catch (_) {}
+                }
+
+                for (const p of prods) {
+                    if (pendingProductIds.has(p.id)) {
+                        console.log(`⚠️ Producto ${p.nombre} omitido en sincro por transacción pendiente.`);
+                        continue;
+                    }
+
+                    const s1 = p.stock?.find(s => s.local_id === 1)?.cantidad || 0;
+                    const s2 = p.stock?.find(s => s.local_id === 2)?.cantidad || 0;
+
+                    await db.execute(
+                        "DELETE FROM productos WHERE codigo = ? AND id != ?",
+                        [p.codigo, p.id]
+                    );
+
+                    await db.execute(
+                        `INSERT OR REPLACE INTO productos (
+                            id, codigo, nombre, precio_venta, precio_costo, 
+                            precio_costo_usd, precio_promo, en_promo, 
+                            categoria_id, marca, modelo, activo, 
+                            proveedor_id, stock_l1, stock_l2
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [
+                            p.id, p.codigo, p.nombre, p.precio_venta || 0, p.precio_costo || 0,
+                            p.precio_costo_usd || 0, p.precio_promo || 0, p.en_promo ? 1 : 0, 
+                            p.categoria_id, p.marca, p.modelo, 1, p.proveedor_id, s1, s2
+                        ]
+                    );
+                }
+
+                if (prods.length > 0) {
+                    const codigosNube = new Set(prods.map(p => p.codigo?.toString().trim()).filter(Boolean))
+                    const localesActivos = await db.select(
+                        "SELECT id, codigo FROM productos WHERE activo = 1"
+                    )
+                    for (const loc of localesActivos) {
+                        const cod = loc.codigo?.toString().trim()
+                        if (cod && !codigosNube.has(cod)) {
+                            await db.execute("UPDATE productos SET activo = 0 WHERE id = ?", [loc.id])
+                            console.log(`🧹 Producto local ID ${loc.id} (cod:${cod}) marcado inactivo - no existe en nube`)
+                        }
+                    }
+                }
+                await db.execute("COMMIT");
+            } catch (e) {
+                try { await db.execute("ROLLBACK"); } catch (_) {}
+                throw e;
+            }
+        } else {
             const localesActivos = await db.select(
                 "SELECT id, codigo FROM productos WHERE activo = 1"
             )
@@ -2464,13 +2502,10 @@ export async function sincronizarTablasMaestras() {
             }
         }
 
-        await db.execute("COMMIT");
-
         console.log("✅ Sincronización maestra finalizada protegiendo datos locales.");
     } catch (error) {
         console.error("Error sincronizando maestros:", error);
-        try { await db.execute("ROLLBACK"); } catch (_) {}
-        throw error; // Importante para que el try/catch de App.jsx se entere del fallo
+        throw error;
     }
 }
 
@@ -2563,7 +2598,7 @@ export async function guardarTecnico(data) {
     return data;
   }
 
-  // Nuevo: primero intentar en Supabase para obtener el ID real
+  // Nuevo: intentar en Supabase para obtener el ID real
   if (window.navigator.onLine) {
     try {
       const { data: supData, error } = await supabase.from('tecnicos').insert({
@@ -2581,10 +2616,12 @@ export async function guardarTecnico(data) {
     }
   }
 
-  // Offline fallback: guardar solo local
+  // Offline fallback: guardar local + encolar para subir después
   const r = await db.execute("INSERT INTO tecnicos (nombre, telefono, especialidad) VALUES (?, ?, ?)",
     [data.nombre.trim(), data.telefono || null, data.especialidad || null]);
   data.id = r.lastInsertId;
+  await db.execute("INSERT INTO tecnicos_pendientes (payload, fecha) VALUES (?, ?)",
+    [JSON.stringify({ nombre: data.nombre.trim(), telefono: data.telefono || null, especialidad: data.especialidad || null }), new Date().toISOString()]);
   return data;
 }
 
