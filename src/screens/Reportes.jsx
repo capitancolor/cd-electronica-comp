@@ -141,7 +141,7 @@ export default function Reportes({ usuario, config }) {
   const [categorias, setCategorias] = useState([])
   const [filtroCategoria, setFiltroCategoria] = useState('')
   const [busquedaTexto, setBusquedaTexto] = useState('')
-  const [ventaDetalleVisible, setVentaDetalleVisible] = useState(null);
+
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [editandoVenta, setEditandoVenta] = useState(null);
   const [editItems, setEditItems] = useState([]);
@@ -277,36 +277,60 @@ export default function Reportes({ usuario, config }) {
       )
     }
     
-    return result.sort((a, b) => {
-      let valA = a[sortConfig.key] || ''
-      let valB = b[sortConfig.key] || ''
+    return result
+  }, [ventas, filtroMetodo, filtroCategoria, sortConfig, busquedaTexto])
 
-      if (['total', 'costo_total', 'ganancia'].includes(sortConfig.key)) {
-        valA = Number(valA || 0)
-        valB = Number(valB || 0)
+  const articulosData = useMemo(() => {
+    const rows = [];
+    for (const v of listaAMostrar) {
+      for (const item of (v.venta_items || [])) {
+        const cantidad = Number(item.cantidad || 0);
+        const precioUnitario = Number(item.precio_unitario || 0);
+        const precioCosto = Number(item.productos?.precio_costo || 0);
+        rows.push({
+          fecha: v.fecha,
+          articulo: item.productos?.nombre || item.descripcion || '—',
+          marca: item.productos?.marca || '—',
+          modelo: item.productos?.modelo || '—',
+          local: v.local_nombre,
+          vendedor: v.vendedor,
+          metodo_pago: v.metodo_pago,
+          cantidad: cantidad,
+          costo: cantidad * precioCosto,
+          precio: cantidad * precioUnitario,
+          ganancia: (cantidad * precioUnitario) - (cantidad * precioCosto),
+          venta: v,
+        });
       }
-
+    }
+    return rows.sort((a, b) => {
+      let valA, valB;
+      const key = sortConfig.key;
+      if (['costo', 'precio', 'ganancia', 'cantidad'].includes(key)) {
+        valA = a[key];
+        valB = b[key];
+      } else {
+        valA = (a[key] || '').toString().toLowerCase();
+        valB = (b[key] || '').toString().toLowerCase();
+      }
       if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
       if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
-    })
-  }, [ventas, filtroMetodo, filtroCategoria, sortConfig, busquedaTexto])
+    });
+  }, [listaAMostrar, sortConfig])
 
-  const totalPeriodo = listaAMostrar.reduce((s, v) => s + Number(v.total || 0), 0)
-  const gananciaTotal = listaAMostrar.reduce((acc, v) => {
-    const base = Number(v.total || 0) - Number(v.costo_total || 0);
-    const notaDebito = (v.venta_items || [])
-      .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
-      .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
-    return acc + base - notaDebito;
+  const ventasSinNC = useMemo(() => listaAMostrar.filter(v => v.metodo_pago !== 'nota_credito'), [listaAMostrar])
+  const totalPeriodo = ventasSinNC.reduce((s, v) => s + Number(v.total || 0), 0)
+  const gananciaTotal = ventasSinNC.reduce((acc, v) => {
+    return acc + Number(v.total || 0) - Number(v.costo_total || 0);
   }, 0)
-  const costoTotalPeriodo = listaAMostrar.reduce((s, v) => s + Number(v.costo_total || 0), 0)
-  const efectivoTotal = listaAMostrar.reduce((s, v) => {
+  const costoTotalPeriodo = ventasSinNC.reduce((s, v) => s + Number(v.costo_total || 0), 0)
+  const efectivoTotal = ventasSinNC.reduce((s, v) => {
     if (v.metodo_pago === 'efectivo') return s + Number(v.total || 0)
     if (v.metodo_pago === 'mixto') return s + Number(v.detalle_mixto?.efectivo || 0)
     return s
   }, 0)
-  const tarjetaTransferenciaTotal = listaAMostrar.reduce((s, v) => {
+  const tarjetaTransferenciaTotal = ventasSinNC.reduce((s, v) => {
     if (v.metodo_pago === 'tarjeta') return s + Number(v.total || 0)
     if (v.metodo_pago === 'transferencia') return s + Number(v.total || 0)
     if (v.metodo_pago === 'mixto') {
@@ -316,7 +340,7 @@ export default function Reportes({ usuario, config }) {
   }, 0)
   
   // NUEVO CÁLCULO: Cantidad de artículos vendidos (suma de cantidades en venta_items)
-  const articulosVendidos = listaAMostrar.reduce((acc, v) => {
+  const articulosVendidos = ventasSinNC.reduce((acc, v) => {
     const cantVenta = v.venta_items?.reduce((sum, item) => sum + (Number(item.cantidad) || 0), 0) || 0;
     return acc + cantVenta;
   }, 0);
@@ -395,65 +419,57 @@ export default function Reportes({ usuario, config }) {
   <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
     <tr style={{ background: UI.theadBg }}>
       <SortableTh label="FECHA" field="fecha" sortConfig={sortConfig} onSort={handleSort} />
-      <SortableTh label="ARTÍCULO" field="productos_nombres" sortConfig={sortConfig} onSort={handleSort} />
-      <SortableTh label="MARCA" field="productos_marcas" sortConfig={sortConfig} onSort={handleSort} />
-      <SortableTh label="MODELO" field="productos_modelos" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="ARTÍCULO" field="articulo" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="MARCA" field="marca" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="MODELO" field="modelo" sortConfig={sortConfig} onSort={handleSort} />
+      <SortableTh label="CANT." field="cantidad" sortConfig={sortConfig} onSort={handleSort} align="right" />
       <SortableTh label="LOCAL" field="local_nombre" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="VENDEDOR" field="vendedor" sortConfig={sortConfig} onSort={handleSort} />
       <SortableTh label="PAGO" field="metodo_pago" sortConfig={sortConfig} onSort={handleSort} />
-      {!esVendedor && <SortableTh label="COSTO" field="costo_total" sortConfig={sortConfig} onSort={handleSort} align="right" />}
-      <SortableTh label="PRECIO" field="total" sortConfig={sortConfig} onSort={handleSort} align="right" />
-      {!esVendedor && <SortableTh label="GANANCIA" field="total" sortConfig={sortConfig} onSort={handleSort} align="right" />}
+      {!esVendedor && <SortableTh label="COSTO" field="costo" sortConfig={sortConfig} onSort={handleSort} align="right" />}
+      <SortableTh label="PRECIO" field="precio" sortConfig={sortConfig} onSort={handleSort} align="right" />
+      {!esVendedor && <SortableTh label="GANANCIA" field="ganancia" sortConfig={sortConfig} onSort={handleSort} align="right" />}
       
       <th style={{ width: 50 }}></th>
     </tr>
   </thead>
   <tbody>
-    {listaAMostrar.length === 0 ? (
+    {articulosData.length === 0 ? (
       <tr>
-        <td colSpan={esVendedor ? 9 : 11} style={{ textAlign: 'center', padding: 60, color: UI.pageMuted, fontWeight: 600 }}>
+        <td colSpan={esVendedor ? 10 : 12} style={{ textAlign: 'center', padding: 60, color: UI.pageMuted, fontWeight: 600 }}>
           No hay registros.
         </td>
       </tr>
     ) : (
-      listaAMostrar.map(v => {
-        const costo = Number(v.costo_total || 0);
-        const precio = Number(v.total || 0);
-        const notaDebito = (v.venta_items || [])
-          .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
-          .reduce((s, i) => s + i.cantidad * i.precio_unitario, 0);
-        const ganancia = precio - costo - notaDebito;
+      articulosData.map((row, idx) => {
+        const costo = Number(row.costo || 0);
+        const precio = Number(row.precio || 0);
+        const ganancia = Number(row.ganancia || 0);
         return (
-          <tr key={v.id} style={{ background: UI.rowBg, borderBottom: `1px solid ${UI.rowBorder}` }}>
+          <tr key={`${row.venta.id}-${idx}`} style={{ background: UI.rowBg, borderBottom: `1px solid ${UI.rowBorder}` }}>
             <td style={{ padding: 14, color: UI.dateText, fontSize: 11, fontWeight: 600 }}>
-              {new Date(v.fecha).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+              {new Date(row.fecha).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
             </td>
-        <td style={{ padding: 14, fontSize: 11, fontWeight: 700, maxWidth: 200 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: UI.priceText }} title={v.productos_nombres}>
-              {v.productos_nombres || "Venta Directa"}
-            </div>
-            <button onClick={() => setVentaDetalleVisible(v)} style={{ background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 6, padding: '3px 5px', cursor: 'pointer', display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-              <Icon name="stock" size={10} color="#4b5563" />
-            </button>
-          </div>
-        </td>
-        <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.productos_marcas || '-'}</td>
-        <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.productos_modelos || '-'}</td>
-            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.local_nombre}</td>
-            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{v.vendedor || '-'}</td>
-            <td style={{ padding: 14 }}><Badge color={METODO_COLOR[v.metodo_pago] || UI.pageMuted}>{v.metodo_pago.toUpperCase()}</Badge></td>
-        {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: UI.pageMuted, fontSize: 11 }}>{fmt(costo)}</td>}
-        <td style={{ padding: 14, textAlign: 'right', fontWeight: 800, color: UI.priceText }}>{fmt(precio)}</td>
-        {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: ganancia >= 0 ? UI.profitPositive : UI.profitNegative, fontWeight: 800 }}>{fmt(ganancia)}</td>}
+            <td style={{ padding: 14, fontSize: 11, fontWeight: 700, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: UI.priceText }} title={row.articulo}>
+              {row.articulo}
+            </td>
+            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{row.marca}</td>
+            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{row.modelo}</td>
+            <td style={{ padding: 14, textAlign: 'right', fontWeight: 700, color: UI.priceText }}>{row.cantidad}</td>
+            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{row.local}</td>
+            <td style={{ padding: 14, color: UI.pageText, fontSize: 12 }}>{row.vendedor}</td>
+            <td style={{ padding: 14 }}><Badge color={METODO_COLOR[row.metodo_pago] || UI.pageMuted}>{row.metodo_pago.toUpperCase()}</Badge></td>
+            {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: UI.pageMuted, fontSize: 11 }}>{fmt(costo)}</td>}
+            <td style={{ padding: 14, textAlign: 'right', fontWeight: 800, color: UI.priceText }}>{fmt(precio)}</td>
+            {!esVendedor && <td style={{ padding: 14, textAlign: 'right', color: ganancia >= 0 ? UI.profitPositive : UI.profitNegative, fontWeight: 800 }}>{fmt(ganancia)}</td>}
             <td style={{ padding: '0 10px', textAlign: 'center' }}>
               <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
                 <button 
                     onClick={(e) => {
                     e.stopPropagation();
-                    setEditandoVenta(v);
-                    setEditFecha(v.fecha ? new Date(v.fecha).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
-                    setEditItems((v.venta_items || []).map(it => ({ ...it, producto_id: it.producto_id || it.productos?.id, nombre: it.productos?.nombre || it.descripcion, marca: it.productos?.marca || '', modelo: it.productos?.modelo || '' })));
+                    setEditandoVenta(row.venta);
+                    setEditFecha(row.venta.fecha ? new Date(row.venta.fecha).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
+                    setEditItems((row.venta.venta_items || []).map(it => ({ ...it, producto_id: it.producto_id || it.productos?.id, nombre: it.productos?.nombre || it.descripcion, marca: it.productos?.marca || '', modelo: it.productos?.modelo || '' })));
                   }}
                   style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
@@ -462,7 +478,7 @@ export default function Reportes({ usuario, config }) {
                 <button 
                 onClick={(e) => {
                   e.stopPropagation();
-                  setConfirmDelete(v);
+                  setConfirmDelete(row.venta);
                 }}
                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
@@ -487,116 +503,6 @@ export default function Reportes({ usuario, config }) {
           </div>
         </div>
       )}
-
-{/* MODAL DE DETALLE DE PRODUCTOS */}
-{ventaDetalleVisible && (
-  <div 
-    onClick={() => setVentaDetalleVisible(null)} 
-    style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 20 }}
-  >
-    <div 
-      onClick={e => e.stopPropagation()} 
-      style={{ background: '#fff', padding: 24, borderRadius: 16, width: '100%', maxWidth: 420, boxShadow: '0 20px 25px -5px rgba(0,0,0,0.2)', border: '1px solid #000' }}
-    >
-      <div className="row-between" style={{ marginBottom: 16, borderBottom: `1px solid ${UI.divider}`, paddingBottom: 12 }}>
-        <div className="col">
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>DETALLE DE VENTA</h3>
-          <span style={{ fontSize: 11, color: UI.pageMuted }}>
-            {new Date(ventaDetalleVisible.fecha).toLocaleString('es-AR')}
-          </span>
-        </div>
-        <button onClick={() => setVentaDetalleVisible(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: UI.pageMuted }}>
-          <Icon name="x" size={20} />
-        </button>
-      </div>
-
-      <div style={{ maxHeight: '350px', overflowY: 'auto', paddingRight: 5 }}>
-        <div style={{ fontSize: 10, fontWeight: 800, color: UI.pageMuted, marginBottom: 10, letterSpacing: 0.5 }}>ARTÍCULOS:</div>
-        
-        {/* Usamos venta_items que ya trae los datos desglosados */}
-        {ventaDetalleVisible.venta_items?.map((item, i) => (
-          <div key={i} style={{ 
-            padding: '12px', 
-            background: '#f8fafc', 
-            borderRadius: 10, 
-            marginBottom: 8, 
-            border: '1px solid #e2e8f0',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 4
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <span style={{ fontSize: 13, fontWeight: 800, color: '#111827' }}>
-                  {item.productos?.nombre || item.descripcion || "Ingreso Manual"}
-                </span>
-                <div style={{ fontSize: 11, color: '#666', marginTop: 2, fontWeight: 600 }}>
-                  {item.productos?.marca || item.marca || '-'} / {item.productos?.modelo || item.modelo || '-'}
-                </div>
-              </div>
-              <span style={{ fontSize: 13, fontWeight: 900, color: UI.primaryBtnBg, whiteSpace: 'nowrap' }}>
-                {fmt(item.precio_unitario * item.cantidad)}
-              </span>
-            </div>
-            
-            <div style={{ fontSize: 11, color: UI.pageMuted, fontWeight: 600, display: 'flex', gap: 10 }}>
-              <span>{item.cantidad} x {fmt(item.precio_unitario)}</span>
-              {ventaDetalleVisible.detalle_mixto?.fechas_compra?.[item.producto_id] && (
-                <span style={{ color: '#dc2626' }}>Compra: {ventaDetalleVisible.detalle_mixto.fechas_compra[item.producto_id]}</span>
-              )}
-            </div>
-          </div>
-        ))}
-
-        {(!ventaDetalleVisible.venta_items || ventaDetalleVisible.venta_items.length === 0) && (
-          <div style={{ padding: 20, textAlign: 'center', fontSize: 12, color: UI.pageMuted }}>
-            No hay información de ítems disponible.
-          </div>
-        )}
-      </div>
-
-      <div style={{ marginTop: 20, paddingTop: 16, borderTop: `2px solid #000`, display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <div className="row-between" style={{ fontSize: 13, fontWeight: 700, color: UI.pageMuted }}>
-          <span>MÉTODO DE PAGO:</span>
-          <span style={{ textTransform: 'uppercase' }}>{ventaDetalleVisible.metodo_pago}</span>
-        </div>
-        {ventaDetalleVisible.metodo_pago === 'mixto' && ventaDetalleVisible.detalle_mixto && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4, padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-            {ventaDetalleVisible.detalle_mixto.efectivo > 0 && (
-              <div className="row-between" style={{ fontSize: 13, fontWeight: 600 }}>
-                <span style={{ color: '#059669' }}>Efectivo</span>
-                <span>{fmt(ventaDetalleVisible.detalle_mixto.efectivo)}</span>
-              </div>
-            )}
-            {ventaDetalleVisible.detalle_mixto.tarjeta > 0 && (
-              <div className="row-between" style={{ fontSize: 13, fontWeight: 600 }}>
-                <span style={{ color: '#2563eb' }}>Tarjeta</span>
-                <span>{fmt(ventaDetalleVisible.detalle_mixto.tarjeta)}</span>
-              </div>
-            )}
-            {ventaDetalleVisible.detalle_mixto.transferencia > 0 && (
-              <div className="row-between" style={{ fontSize: 13, fontWeight: 600 }}>
-                <span style={{ color: '#d97706' }}>Transferencia</span>
-                <span>{fmt(ventaDetalleVisible.detalle_mixto.transferencia)}</span>
-              </div>
-            )}
-          </div>
-        )}
-        <div className="row-between" style={{ fontSize: 15, fontWeight: 900, marginTop: 4 }}>
-          <span>TOTAL:</span>
-          <span style={{ color: UI.statGanancia, fontSize: 22 }}>{fmt(ventaDetalleVisible.total)}</span>
-        </div>
-      </div>
-
-      <button 
-        onClick={() => setVentaDetalleVisible(null)} 
-        style={{ width: '100%', marginTop: 20, height: 48, borderRadius: 12, background: '#111', color: '#fff', fontWeight: 800, border: 'none', cursor: 'pointer', fontSize: 14 }}
-      >
-        ENTENDIDO
-      </button>
-    </div>
-  </div>
-)}
 
 {editandoVenta && (
   <div

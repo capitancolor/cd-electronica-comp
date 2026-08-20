@@ -12,7 +12,7 @@ import Notas from './screens/Notas'
 import Clientes from './screens/Clientes' 
 import Reparaciones from './screens/Reparaciones'
 // MonitorPrecios removed
-import { inicializarBaseLocal, sincronizarTablasMaestras, sincronizarClientes, sincronizarReparacionesMaestras, procesarVentasPendientes, procesarProductosPendientes, procesarClientesPendientes, procesarTecnicosPendientes, congelarVentasAnteriores } from './services/negocio';
+import { inicializarBaseLocal, sincronizarTablasMaestras, sincronizarClientes, sincronizarReparacionesMaestras, procesarVentasPendientes, procesarProductosPendientes, procesarClientesPendientes, procesarTecnicosPendientes, procesarReparacionesPendientes, congelarVentasAnteriores } from './services/negocio';
 
 const NAV = [
   { id: 'ventas',       label: 'Nueva Venta',  icon: 'computer', roles: ['admin', 'vendedor'] },
@@ -70,11 +70,19 @@ const ejecutarSincroCompleta = async () => {
       await procesarTecnicosPendientes();
       console.log("⬆️ Técnicos pendientes subidos.");
 
+      await procesarReparacionesPendientes();
+      console.log("⬆️ Reparaciones pendientes subidas.");
+
       await sincronizarClientes();
       console.log("⬇️ Clientes sincronizados desde la nube.");
 
-      await sincronizarTablasMaestras();
-      console.log("⬇️ Stock actualizado desde la nube.");
+      try {
+        await sincronizarTablasMaestras();
+        console.log("⬇️ Stock actualizado desde la nube.");
+      } catch (e) {
+        // No abortamos el resto del sync: las reparaciones siguen sincronizando
+        console.warn("⚠️ No se pudo sincronizar el stock, se continúa:", e.message);
+      }
 
       await congelarVentasAnteriores();
       console.log("📸 Ventas anteriores congeladas.");

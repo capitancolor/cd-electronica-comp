@@ -759,6 +759,22 @@ export async function registrarNotaCredito({ localId, usuarioId, items, motivo }
   }
 }
 
+// Costo histórico de una venta. Prioriza costo_reparacion / costo_proporcional
+// (ya congelados a la fecha de venta) y para el resto usa los snapshots de
+// items_snapshot (costo congelado) antes que el costo actual del producto.
+// Así TODAS las pantallas calculan la ganancia con la misma base.
+function calcularCostoVenta(v) {
+  if (v?.detalle_mixto?.costo_reparacion) return v.detalle_mixto.costo_reparacion;
+  if (v?.detalle_mixto?.costo_proporcional) return v.detalle_mixto.costo_proporcional;
+  const snapMap = {};
+  (v?.detalle_mixto?.items_snapshot || []).forEach(s => { snapMap[s.producto_id || 'null'] = s; });
+  return (v?.venta_items || []).reduce((sum, i) => {
+    const snap = snapMap[i.producto_id || 'null'];
+    const costo = snap?.precio_costo ?? i.productos?.precio_costo ?? 0;
+    return sum + (i.cantidad || 0) * costo;
+  }, 0) || 0;
+}
+
 export async function getVentas({ localId = null, fechaDesde = null, fechaHasta = null, limit = 1000 } = {}) {
     const db = await Database.load("sqlite:cd_electronica.db");
 
@@ -800,7 +816,7 @@ export async function getVentas({ localId = null, fechaDesde = null, fechaHasta 
                 productos_marcas: [...new Set(v.venta_items?.map(i => i.productos?.marca).filter(Boolean))].join(', '),
                 productos_modelos: [...new Set(v.venta_items?.map(i => i.productos?.modelo).filter(Boolean))].join(', '),
                 categorias_nombres: [...new Set(v.venta_items?.map(i => i.productos?.categorias?.nombre).filter(Boolean))].join(', ') || 'Sin categoría',
-                costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((acc, item) => acc + (item.cantidad * (item.productos?.precio_costo || 0)), 0) || 0,
+                costo_total: calcularCostoVenta(v),
                 venta_items: v.venta_items?.map(item => ({
                     ...item,
                     categoria_nombre: item.productos?.categorias?.nombre || 'Sin categoría'
@@ -934,7 +950,7 @@ export async function getVentasResumen({ localId = null, fechaDesde = null, fech
         console.log(`getVentasResumen: ${data?.length || 0} ventas`);
         return (data || []).map(v => ({
             ...v,
-            costo_total: v.detalle_mixto?.costo_reparacion || v.detalle_mixto?.costo_proporcional || v.venta_items?.reduce((sum, i) => sum + (i.cantidad || 0) * (i.productos?.precio_costo || 0), 0) || 0,
+            costo_total: calcularCostoVenta(v),
             local_nombre: v.locales?.nombre || 'S/D',
             productos_nombres: v.venta_items?.map(i => i.descripcion).filter(Boolean).join(', ') || (v.detalle_mixto?.items_snapshot?.map(s => s.nombre).filter(Boolean).join(', ') || undefined),
             venta_items: v.venta_items?.map(i => ({
@@ -1441,10 +1457,44 @@ export async function getReparaciones(busqueda = '') {
   }
 }
 
+async function subirReparacionANube(payload) {
+  // El id local es Date.now() (13 dígitos), pero la columna id de la tabla
+  // reparaciones en Supabase es integer (int4, máx ~2.1B). Si el id no entra,
+  // lo omitimos para que Supabase genere uno propio y lo devolvemos para
+  // re-mapear el registro local.
+  const intento = { ...payload };
+  let idEnviado = intento.id ?? null;
+  if (typeof idEnviado === 'number' && (idEnviado > 2147483647 || idEnviado < -2147483648)) {
+    delete intento.id;
+    idEnviado = null;
+  }
+
+  // Si la tabla de Supabase no tiene alguna columna, PostgREST devuelve
+  // PGRST204 "Could not find the 'X' column". Lo detectamos y reintentamos
+  // omitiendo SOLO esa columna (así funciona con cualquier esquema, incluso
+  // parcial). En cuanto existan todas las columnas, se sube todo.
+  for (let i = 0; i < 20; i++) {
+    const { data, error } = await supabase.from('reparaciones').upsert(intento).select().single();
+    if (!error) return { data, idFinal: data?.id ?? idEnviado };
+    const col = error?.message?.match(/Could not find the '([^']+)' column/)?.[1];
+    if (col && col in intento && intento[col] !== undefined) {
+      delete intento[col];
+      console.warn(`Reparaciones: columna "${col}" no existe en la nube, se omite al sincronizar.`);
+      continue;
+    }
+    return { error };
+  }
+  return { error: new Error('No se pudo sincronizar la reparación a la nube') };
+}
+
 export async function guardarReparacion(reparacion) {
   const db = await Database.load("sqlite:cd_electronica.db");
 
+  const id = reparacion.id || Date.now()
+  const repuestosJson = reparacion.repuestos?.length > 0 ? JSON.stringify(reparacion.repuestos) : null;
+
   const payload = {
+    id,
     fecha: reparacion.fecha || new Date().toISOString(),
     cliente: reparacion.cliente?.trim(),
     equipo: reparacion.equipo?.trim(),
@@ -1457,36 +1507,47 @@ export async function guardarReparacion(reparacion) {
     estado: reparacion.id ? (reparacion.estado || 'En Progreso') : 'En Progreso',
     precio: parseFloat(String(reparacion.precio || '0').replace(/\./g, '').replace(',', '.')),
     costo: parseFloat(String(reparacion.costo || '0').replace(/\./g, '').replace(',', '.')),
-    tecnico_id: reparacion.tecnico_id ? parseInt(reparacion.tecnico_id) : null
+    tecnico_id: reparacion.tecnico_id ? parseInt(reparacion.tecnico_id) : null,
+    marca: reparacion.marca || '',
+    modelo: reparacion.modelo || '',
+    telefono: reparacion.telefono || '',
+    accesorios: reparacion.accesorios || '',
+    arreglo: reparacion.arreglo || '',
+    repuestos: repuestosJson,
+    cobrado: reparacion.cobrado ? true : false
   };
 
   // 1. Guardar primero en SQLite local (siempre funciona)
-  const id = reparacion.id || Date.now()
-  const repuestosJson = reparacion.repuestos?.length > 0 ? JSON.stringify(reparacion.repuestos) : null;
   await db.execute(`
     INSERT OR REPLACE INTO reparaciones (
       id, cliente, equipo, problema, estado, precio, costo, fecha, tecnico_id,
       marca, modelo, telefono, accesorios, arreglo, repuestos, cobrado
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, payload.cliente, payload.equipo, payload.problema, payload.estado, payload.precio, payload.costo, payload.fecha, payload.tecnico_id,
-     reparacion.marca || '', reparacion.modelo || '', reparacion.telefono || '', reparacion.accesorios || '', reparacion.arreglo || '',
-     repuestosJson, reparacion.cobrado ? 1 : 0]
+    [payload.id, payload.cliente, payload.equipo, payload.problema, payload.estado, payload.precio, payload.costo, payload.fecha, payload.tecnico_id,
+     payload.marca, payload.modelo, payload.telefono, payload.accesorios, payload.arreglo, payload.repuestos, payload.cobrado ? 1 : 0]
   );
 
-  // 2. Intentar en Supabase (si falla, el local ya quedó guardado)
+  // 2. Intentar en Supabase; si falla, encolar para reintentar cuando haya conexión
   try {
-    const { data, error } = await supabase
-      .from('reparaciones')
-      .upsert(reparacion.id ? { ...payload, id: reparacion.id } : { ...payload, id })
-      .select()
-      .single();
-
-    if (!error && data && data.id && !reparacion.id) {
-      // Si es nuevo y Supabase generó otro id, actualizamos el local
-      await db.execute("UPDATE reparaciones SET id = ? WHERE id = ?", [data.id, id]);
+    const { data, error, idFinal } = await subirReparacionANube(payload);
+    if (!error && data && data.id) {
+      if (data.id !== id) {
+        // Supabase generó otro id (ej: el local era Date.now() y no entraba en int4)
+        await db.execute("UPDATE reparaciones SET id = ? WHERE id = ?", [data.id, id]);
+      }
+      return { id: idFinal, ...payload };
     }
+    await db.execute(
+      "INSERT INTO reparaciones_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+      [JSON.stringify(payload), new Date().toISOString()]
+    );
+    console.warn("Reparación guardada localmente y encolada para sincronizar:", error?.message);
   } catch (e) {
-    console.warn("Supabase no disponible, guardado solo local:", e.message);
+    console.warn("Supabase no disponible, reparación encolada para sincronizar:", e.message);
+    await db.execute(
+      "INSERT INTO reparaciones_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+      [JSON.stringify(payload), new Date().toISOString()]
+    );
   }
 
   return { id, ...payload };
@@ -1743,9 +1804,10 @@ export const getStock = async ({ busqueda = '' } = {}) => {
 export async function getResumenHoy(localId) {
   try {
     const hoy = new Date(); hoy.setHours(0,0,0,0)
-    const { data, error } = await supabase.from('ventas').select('total').eq('local_id', localId).gte('fecha', hoy.toISOString())
+    const { data, error } = await supabase.from('ventas').select('total, metodo_pago').eq('local_id', localId).gte('fecha', hoy.toISOString())
     if (error) throw error;
-    return { cant: data?.length || 0, total: data?.reduce((s, v) => s + Number(v.total), 0) || 0 }
+    const ventasReales = (data || []).filter(v => v.metodo_pago !== 'nota_credito')
+    return { cant: ventasReales.length, total: ventasReales.reduce((s, v) => s + Number(v.total), 0) || 0 }
   } catch (error) {
     if (checkOfflineError(error)) return { cant: 0, total: 0, offline: true };
     throw error;
@@ -1878,11 +1940,20 @@ export async function procesarReparacionesPendientes() {
         for (const row of pendientes) {
             try {
                 const payload = JSON.parse(row.payload);
-                const { error } = await supabase.from('reparaciones').upsert(payload);
+                const { data, error } = await subirReparacionANube(payload);
                 
-                if (!error) {
+                if (!error && data) {
+                    // Si Supabase generó un ID nuevo (ej: el local era Date.now() y no entraba en int4),
+                    // remapear el ID en la tabla local reparaciones.
+                    if (data.id && payload.id && String(data.id) !== String(payload.id)) {
+                        try {
+                            await db.execute("UPDATE reparaciones SET id = ? WHERE id = ?", [data.id, payload.id]);
+                        } catch (updErr) {
+                            console.warn(`Reparación ID ${payload.id}: el remapeo local falló (ya migrado?), nube ID ${data.id}.`);
+                        }
+                    }
                     await db.execute("DELETE FROM reparaciones_pendientes WHERE id = ?", [row.id]);
-                    console.log(`Reparación pendiente ID ${row.id} sincronizada.`);
+                    console.log(`✅ Reparación pendiente ID ${payload.id} → nube ID ${data.id}.`);
                 }
             } catch (err) { console.error("Error subiendo reparación:", err); }
         }
@@ -1950,6 +2021,53 @@ export async function procesarProductosPendientes() {
     } catch (err) { console.error("Error en procesarProductosPendientes:", err) }
 }
 
+const reparacionVacio = (v) => v === null || v === undefined || v === '' || v === 0;
+
+// Fusiona la copia de la nube con la local. La nube es autoridad para los
+// datos que tiene, pero si viene con un campo vacío (copias degradadas,
+// anteriores a que existieran las columnas), se conserva el valor local
+// para NO perder datos que ya estaban cargados en la PC.
+function mergeReparacion(cloud, local) {
+  const m = {};
+  const campos = ['id', 'cliente', 'equipo', 'problema', 'estado', 'precio', 'costo', 'fecha',
+                  'tecnico_id', 'marca', 'modelo', 'telefono', 'accesorios', 'arreglo', 'repuestos', 'cobrado'];
+  for (const campo of campos) {
+    const cv = cloud?.[campo];
+    const lv = local?.[campo];
+    m[campo] = !reparacionVacio(cv) ? cv : (!reparacionVacio(lv) ? lv : cv);
+  }
+  return m;
+}
+
+// Detecta si la copia de la nube perdió datos que todavía están en local
+// (ej: se subió antes de que existieran las columnas en Supabase).
+function reparacionDegradada(cloud, local) {
+  if (!cloud || !local) return false;
+  const campos = ['precio', 'tecnico_id', 'marca', 'modelo', 'telefono', 'accesorios', 'arreglo', 'repuestos', 'cobrado'];
+  return campos.some(c => reparacionVacio(cloud[c]) && !reparacionVacio(local[c]));
+}
+
+function payloadReparacionLocal(lr) {
+  return {
+    id: lr.id,
+    fecha: lr.fecha,
+    cliente: lr.cliente,
+    equipo: lr.equipo,
+    problema: lr.problema,
+    estado: lr.estado,
+    precio: Number(lr.precio) || 0,
+    costo: Number(lr.costo) || 0,
+    tecnico_id: lr.tecnico_id || null,
+    marca: lr.marca || '',
+    modelo: lr.modelo || '',
+    telefono: lr.telefono || '',
+    accesorios: lr.accesorios || '',
+    arreglo: lr.arreglo || '',
+    repuestos: lr.repuestos || null,
+    cobrado: lr.cobrado ? true : false
+  };
+}
+
 export async function sincronizarReparacionesMaestras() {
     try {
         const db = await Database.load("sqlite:cd_electronica.db");
@@ -1958,36 +2076,109 @@ export async function sincronizarReparacionesMaestras() {
         const { data: repNube, error } = await supabase.from('reparaciones').select('*');
         if (error) throw error;
 
+        const mapNube = new Map();
         if (repNube) {
-            for (const r of repNube) {
-                // BI-Logic: ¿Tengo esta reparación (por ID) en la cola de pendientes locales?
-                // Esto ocurre si el usuario actualizó el estado de una reparación existente estando offline.
-                const enCola = await db.select(
-                    "SELECT id FROM reparaciones_pendientes WHERE payload LIKE ?",
-                    [`%"id":${r.id}%`]
-                );
+            for (const r of repNube) mapNube.set(String(r.id), r);
+        }
 
-                if (enCola.length > 0) {
-                  console.log(`⚠️ Reparación ID ${r.id} de ${r.cliente} omitida en sincro por actualización local pendiente.`);
-                  continue; // Saltamos este registro, preservamos el cambio local
+        // 2. Bajamos la nube al espejo local SIN pisar datos que ya existen
+        for (const r of repNube || []) {
+            // BI-Logic: ¿Tengo esta reparación (por ID) en la cola de pendientes locales?
+            // Esto ocurre si el usuario actualizó el estado de una reparación existente estando offline.
+            const enCola = await db.select(
+                "SELECT id FROM reparaciones_pendientes WHERE payload LIKE ?",
+                [`%"id":${r.id}%`]
+            );
+
+            if (enCola.length > 0) {
+              console.log(`⚠️ Reparación ID ${r.id} de ${r.cliente} omitida en sincro por actualización local pendiente.`);
+              continue; // Saltamos este registro, preservamos el cambio local
+            }
+
+            const localRow = (await db.select("SELECT * FROM reparaciones WHERE id = ?", [r.id]))[0];
+            const m = mergeReparacion(r, localRow);
+
+            await db.execute(
+                `INSERT OR REPLACE INTO reparaciones 
+                (id, cliente, equipo, problema, estado, precio, costo, fecha, tecnico_id,
+                 marca, modelo, telefono, accesorios, arreglo, repuestos, cobrado) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [m.id, m.cliente, m.equipo, m.problema, m.estado,
+                 m.precio || 0, m.costo || 0, m.fecha,
+                 m.tecnico_id || null,
+                 m.marca || '', m.modelo || '', m.telefono || '',
+                 m.accesorios || '', m.arreglo || '',
+                 m.repuestos ? (typeof m.repuestos === 'string' ? m.repuestos : JSON.stringify(m.repuestos)) : null,
+                 m.cobrado ? 1 : 0]
+            );
+        }
+
+        // 3. Subimos lo que el usuario tiene SOLO en su PC local (backfill)
+        //    y además reparamos copias degradadas en la nube.
+        const locales = await db.select("SELECT * FROM reparaciones");
+        const pendientesRaw = await db.select("SELECT payload FROM reparaciones_pendientes");
+        const pendientesIds = new Set();
+        for (const row of pendientesRaw) {
+            try {
+                const p = JSON.parse(row.payload);
+                if (p.id != null) pendientesIds.add(String(p.id));
+            } catch (_) {}
+        }
+
+        let subidasOk = 0, subidasFallidas = 0;
+
+        for (const lr of locales) {
+            const key = String(lr.id);
+            if (pendientesIds.has(key)) continue; // ya se encargará la cola
+
+            const cloudRow = mapNube.get(key);
+            const payload = payloadReparacionLocal(lr);
+
+            try {
+                if (!cloudRow) {
+                    // No existe en la nube → subirla completa
+                    const { data: upData, error: upErr } = await subirReparacionANube(payload);
+                    if (!upErr && upData) {
+                        if (upData.id && String(upData.id) !== key) {
+                            await db.execute("UPDATE reparaciones SET id = ? WHERE id = ?", [upData.id, lr.id]);
+                        }
+                        subidasOk++;
+                        console.log(`⬆️ Reparación local ID ${key} (${lr.cliente}) subida a la nube.`);
+                    } else {
+                        // FALLÓ → encolar para reintento en la próxima sincronización
+                        await db.execute(
+                            "INSERT INTO reparaciones_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+                            [JSON.stringify(payload), new Date().toISOString()]
+                        );
+                        subidasFallidas++;
+                        console.warn(`⚠️ Reparación ID ${key} (${lr.cliente}) encolada para reintento:`, upErr?.message);
+                    }
+                } else if (reparacionDegradada(cloudRow, lr)) {
+                    // Existe pero sin precio/repuestos/técnico (subida antes de
+                    // agregar las columnas) → la reparamos con los datos locales.
+                    const { error: upErr } = await subirReparacionANube(payload);
+                    if (!upErr) {
+                        console.log(`🔧 Reparación ID ${key} (${lr.cliente}) reparada en la nube con datos completos.`);
+                    } else {
+                        console.warn(`⚠️ No se pudo reparar reparación ID ${key}:`, upErr?.message);
+                    }
                 }
-
-                // 2. Si no hay conflicto, actualizamos nuestro espejo local
-                await db.execute(
-                    `INSERT OR REPLACE INTO reparaciones 
-                    (id, cliente, equipo, problema, estado, precio, costo, fecha, tecnico_id,
-                     marca, modelo, telefono, accesorios, arreglo, repuestos, cobrado) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [r.id, r.cliente, r.equipo, r.problema, r.estado,
-                     r.precio || 0, r.costo || 0, r.fecha,
-                     r.tecnico_id || null,
-                     r.marca || '', r.modelo || '', r.telefono || '',
-                     r.accesorios || '', r.arreglo || '',
-                     r.repuestos || null, r.cobrado ? 1 : 0]
-                );
+            } catch (repErr) {
+                // Error inesperado: encolar para no perder la reparación
+                try {
+                    await db.execute(
+                        "INSERT INTO reparaciones_pendientes (payload, fecha, sincronizado) VALUES (?, ?, 0)",
+                        [JSON.stringify(payload), new Date().toISOString()]
+                    );
+                    subidasFallidas++;
+                    console.warn(`⚠️ Reparación ID ${key} encolada por error inesperado:`, repErr.message);
+                } catch (qErr) {
+                    console.error(`❌ No se pudo encolar reparación ID ${key}:`, qErr.message);
+                }
             }
         }
-        console.log("✅ Reparaciones sincronizadas correctamente.");
+
+        console.log(`✅ Reparaciones sincronizadas: ${subidasOk} subidas, ${subidasFallidas} encoladas para reintento.`);
     } catch (error) {
         console.error("Error sincronizando reparaciones:", error);
     }

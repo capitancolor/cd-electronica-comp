@@ -221,13 +221,7 @@ async function cargarDatos() {
   }
 
   const totalGastosMes = gastos.reduce((s, g) => s + Number(g.monto), 0)
-  const totalGananciaMes = ventas.reduce((s, v) => {
-    const base = Number(v.total) - Number(v.costo_total || 0);
-    const notaDebito = (v.venta_items || [])
-      .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
-      .reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
-    return s + base - notaDebito;
-  }, 0)
+  const totalGananciaMes = ventas.filter(v => v.metodo_pago !== 'nota_credito').reduce((s, v) => s + (Number(v.total || 0) - Number(v.costo_total || 0)), 0)
 
   const gastosOrdenados = useMemo(() => {
     return [...gastos].sort((a, b) => {
@@ -256,14 +250,9 @@ async function cargarDatos() {
         const dia = parseInt(v.fecha?.split('T')[0]?.split('-')[2], 10);
         return dia === d;
       });
-      const ganDia = vDia.reduce((acc, v) => {
-        const base = Number(v.total) - Number(v.costo_total || 0);
-        const notaDebito = (v.venta_items || [])
-          .filter(i => !i.producto_id && i.descripcion?.startsWith('NOTA DE DÉBITO'))
-          .reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
-        return acc + base - notaDebito;
-      }, 0);
-      const totalVentasDia = vDia.reduce((acc, v) => acc + Number(v.total || 0), 0);
+      const ventasRealesDia = vDia.filter(v => v.metodo_pago !== 'nota_credito');
+      const ganDia = ventasRealesDia.reduce((acc, v) => acc + (Number(v.total || 0) - Number(v.costo_total || 0)), 0);
+      const totalVentasDia = ventasRealesDia.reduce((acc, v) => acc + Number(v.total || 0), 0);
       const bal = ganDia - gDia;
       const esFuturo = (anioActual === hoy.getFullYear() && mesActual === hoy.getMonth() && d > hoy.getDate());
       return { d, gDia, ganDia, totalVentasDia, bal, esFuturo, ventasDia: vDia };
